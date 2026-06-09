@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from event_extraction_agent import ExtractionAgent, ExtractionStatus, SourcePost
+from event_extraction_agent import BatchExtractionSettings, ExtractionAgent, ExtractionStatus, SourcePost
 
 
 RAW_TEXT = (
@@ -153,6 +153,84 @@ def test_extract_event_raises_for_non_extracted_outcome():
 
     with pytest.raises(ValueError):
         agent.extract_event(SourcePost(text="5 июня в 18:00 состоится концерт."))
+
+
+def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": _event_payload(start_at="2026-06-05T18:00:00+03:00"),
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"is_event": False, "skip_reason": "not_event_announcement", "event": None},
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": _event_payload(start_at=None),
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    posts = [
+        SourcePost(text=RAW_TEXT, external_id="vk:1"),
+        SourcePost(text=RAW_TEXT, external_id="vk:1"),
+        SourcePost(text="Просто новость без события.", external_id="vk:2"),
+        SourcePost(text="Скоро пройдет встреча.", external_id="vk:3"),
+    ]
+
+    outcomes = ExtractionAgent(llm_client=client).extract_many(posts)
+
+    assert [outcome.post for outcome in outcomes] == posts
+    assert [outcome.status for outcome in outcomes] == [
+        ExtractionStatus.EXTRACTED,
+        ExtractionStatus.SKIPPED,
+        ExtractionStatus.SKIPPED,
+        ExtractionStatus.INVALID,
+    ]
+    assert outcomes[1].errors[0].code == "duplicate_post"
+    assert outcomes[2].errors[0].code == "not_event_announcement"
+    assert outcomes[3].errors[0].code == "missing_start_at"
+    assert len(client.calls) == 3
+
+
+def test_extract_batch_returns_summary_and_applies_error_limit():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at=None),
+            },
+            ensure_ascii=False,
+        )
+    )
+    posts = [
+        SourcePost(text="Скоро пройдет встреча.", external_id="vk:1"),
+        SourcePost(text="5 июня в 18:00 состоится концерт.", external_id="vk:2"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        posts,
+        settings=BatchExtractionSettings(max_errors=1),
+    )
+
+    assert result.total == 2
+    assert result.invalid == 1
+    assert result.skipped == 1
+    assert result.error_count == 1
+    assert result.error_limit_reached is True
+    assert [outcome.status for outcome in result.outcomes] == [ExtractionStatus.INVALID, ExtractionStatus.SKIPPED]
+    assert result.outcomes[1].errors[0].code == "error_limit_reached"
+    assert len(client.calls) == 1
 
 
 def _event_payload(start_at: str | None) -> dict[str, object]:

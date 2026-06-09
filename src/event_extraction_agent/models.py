@@ -58,6 +58,10 @@ class ExtractionStatus(StrEnum):
     LLM_ERROR = "llm_error"
 
 
+class BatchMode(StrEnum):
+    SEQUENTIAL = "sequential"
+
+
 _EVENT_TYPE_ALIASES = {value.value.lower(): value for value in EventType}
 _ATTENDANCE_TYPE_ALIASES = {value.value.lower(): value for value in AttendanceType}
 _EVENT_STATUS_ALIASES = {value.value.lower(): value for value in EventStatus}
@@ -215,3 +219,62 @@ class ExtractionOutcome(BaseModel):
     post: SourcePost
     errors: list[ExtractionError] = Field(default_factory=list)
     raw_llm_metadata: dict[str, Any] | None = None
+
+
+class BatchExtractionSettings(BaseModel):
+    """Settings for deterministic sequential batch extraction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: BatchMode = BatchMode.SEQUENTIAL
+    max_errors: int | None = None
+    skip_empty: bool = True
+    skip_duplicates: bool = True
+
+    @field_validator("max_errors")
+    @classmethod
+    def max_errors_must_be_positive(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("max_errors must be greater than 0")
+        return value
+
+
+class BatchExtractionResult(BaseModel):
+    """Structured result of processing a list of source posts."""
+
+    settings: BatchExtractionSettings = Field(default_factory=BatchExtractionSettings)
+    outcomes: list[ExtractionOutcome] = Field(default_factory=list)
+    total: int = 0
+    extracted: int = 0
+    skipped: int = 0
+    invalid: int = 0
+    llm_errors: int = 0
+    error_count: int = 0
+    error_limit_reached: bool = False
+
+    @classmethod
+    def from_outcomes(
+        cls,
+        outcomes: list[ExtractionOutcome],
+        settings: BatchExtractionSettings | None = None,
+        error_limit_reached: bool = False,
+    ) -> "BatchExtractionResult":
+        extracted = _count_status(outcomes, ExtractionStatus.EXTRACTED)
+        skipped = _count_status(outcomes, ExtractionStatus.SKIPPED)
+        invalid = _count_status(outcomes, ExtractionStatus.INVALID)
+        llm_errors = _count_status(outcomes, ExtractionStatus.LLM_ERROR)
+        return cls(
+            settings=settings or BatchExtractionSettings(),
+            outcomes=outcomes,
+            total=len(outcomes),
+            extracted=extracted,
+            skipped=skipped,
+            invalid=invalid,
+            llm_errors=llm_errors,
+            error_count=invalid + llm_errors,
+            error_limit_reached=error_limit_reached,
+        )
+
+
+def _count_status(outcomes: list[ExtractionOutcome], status: ExtractionStatus) -> int:
+    return sum(1 for outcome in outcomes if outcome.status == status)

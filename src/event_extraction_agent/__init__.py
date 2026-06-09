@@ -9,6 +9,9 @@ from event_extraction_agent.agent import (
 )
 from event_extraction_agent.models import (
     AttendanceType,
+    BatchExtractionResult,
+    BatchExtractionSettings,
+    BatchMode,
     Event,
     EventStatus,
     EventType,
@@ -20,6 +23,9 @@ from event_extraction_agent.models import (
 
 __all__ = [
     "AttendanceType",
+    "BatchExtractionResult",
+    "BatchExtractionSettings",
+    "BatchMode",
     "Event",
     "EventStatus",
     "EventType",

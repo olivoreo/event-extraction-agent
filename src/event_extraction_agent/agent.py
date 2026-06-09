@@ -10,6 +10,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Protocol
 
 from event_extraction_agent.models import (
+    BatchExtractionResult,
+    BatchExtractionSettings,
     Event,
     ExtractionError,
     ExtractionOutcome,
@@ -319,6 +321,77 @@ class ExtractionAgent:
             metadata=self.last_metadata,
         )
 
+    def extract_many(
+        self,
+        posts: list[SourcePost],
+        settings: BatchExtractionSettings | None = None,
+    ) -> list[ExtractionOutcome]:
+        return self.extract_batch(posts, settings=settings).outcomes
+
+    def extract_batch(
+        self,
+        posts: list[SourcePost],
+        settings: BatchExtractionSettings | None = None,
+    ) -> BatchExtractionResult:
+        batch_settings = settings or BatchExtractionSettings()
+        outcomes: list[ExtractionOutcome] = []
+        seen_keys: dict[str, int] = {}
+        error_count = 0
+        error_limit_reached = False
+
+        for index, post in enumerate(posts):
+            if _is_blank_text(post.text) and batch_settings.skip_empty:
+                outcomes.append(
+                    _outcome(
+                        status=ExtractionStatus.SKIPPED,
+                        post=post,
+                        errors=[_error("post.text", "empty_post", "post text is empty")],
+                        metadata={"batch_index": index},
+                    )
+                )
+                continue
+
+            duplicate_key = _post_deduplication_key(post)
+            duplicate_of = seen_keys.get(duplicate_key)
+            if duplicate_of is not None and batch_settings.skip_duplicates:
+                outcomes.append(
+                    _outcome(
+                        status=ExtractionStatus.SKIPPED,
+                        post=post,
+                        errors=[_error("post", "duplicate_post", "post duplicates an earlier batch item")],
+                        metadata={"batch_index": index, "duplicate_of": duplicate_of},
+                    )
+                )
+                continue
+            seen_keys[duplicate_key] = index
+
+            if batch_settings.max_errors is not None and error_count >= batch_settings.max_errors:
+                error_limit_reached = True
+                outcomes.append(
+                    _outcome(
+                        status=ExtractionStatus.SKIPPED,
+                        post=post,
+                        errors=[_error("batch", "error_limit_reached", "batch error limit has been reached")],
+                        metadata={"batch_index": index},
+                    )
+                )
+                continue
+
+            outcome = self.extract(post)
+            metadata = dict(outcome.raw_llm_metadata or {})
+            metadata["batch_index"] = index
+            outcome = outcome.model_copy(update={"raw_llm_metadata": metadata})
+            outcomes.append(outcome)
+
+            if outcome.status in {ExtractionStatus.INVALID, ExtractionStatus.LLM_ERROR}:
+                error_count += 1
+
+        return BatchExtractionResult.from_outcomes(
+            outcomes,
+            settings=batch_settings,
+            error_limit_reached=error_limit_reached,
+        )
+
     def extract_event(self, post: SourcePost) -> Event:
         outcome = self.extract(post)
         if outcome.status != ExtractionStatus.EXTRACTED or outcome.event is None:
@@ -446,6 +519,16 @@ def _infer_title(raw_text: str) -> str:
 
 def _is_missing_value(value: Any) -> bool:
     return value is None or (isinstance(value, str) and value.strip().lower() in {"", "unknown", "null"})
+
+
+def _is_blank_text(value: str) -> bool:
+    return not value.strip()
+
+
+def _post_deduplication_key(post: SourcePost) -> str:
+    if post.external_id:
+        return f"external_id:{post.external_id}"
+    return "text:" + " ".join(post.text.casefold().split())
 
 
 def _coerce_prompt_enum(payload: dict[str, Any], field: str, allowed_values: tuple[str, ...]) -> None:
