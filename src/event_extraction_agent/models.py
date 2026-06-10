@@ -62,6 +62,68 @@ class BatchMode(StrEnum):
     SEQUENTIAL = "sequential"
 
 
+class FallbackPolicy(StrEnum):
+    DISABLED = "disabled"
+    EVENT_TYPE_ONLY = "event_type_only"
+    EXTRACTION_ON_LLM_ERROR = "extraction_on_llm_error"
+
+
+class ExtractionAgentConfig(BaseModel):
+    """Runtime configuration for LLM clients and fallback behavior."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    main_client: Any | None = None
+    fallback_client: Any | None = None
+    event_type_client: Any | None = None
+    main_model: str | None = None
+    fallback_model: str | None = None
+    fallback_policy: FallbackPolicy = FallbackPolicy.EVENT_TYPE_ONLY
+    use_event_type_refinement: bool = True
+    current_datetime: str | None = None
+    request_timeout_seconds: float = 120.0
+    min_request_interval_seconds: float = 0.0
+    max_retries: int = 0
+
+    @field_validator("main_client", "fallback_client", "event_type_client")
+    @classmethod
+    def client_must_implement_complete(cls, value: Any | None) -> Any | None:
+        if value is not None and not callable(getattr(value, "complete", None)):
+            raise ValueError("LLM client must implement complete(system_prompt, user_prompt)")
+        return value
+
+    @field_validator("main_model", "fallback_model")
+    @classmethod
+    def model_name_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("model name must not be blank")
+        return normalized
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def request_timeout_must_be_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("request_timeout_seconds must be greater than 0")
+        return value
+
+    @field_validator("min_request_interval_seconds")
+    @classmethod
+    def rate_limit_must_not_be_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("min_request_interval_seconds must not be negative")
+        return value
+
+    @field_validator("max_retries")
+    @classmethod
+    def max_retries_must_not_be_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("max_retries must not be negative")
+        return value
+
+
 _EVENT_TYPE_ALIASES = {value.value.lower(): value for value in EventType}
 _ATTENDANCE_TYPE_ALIASES = {value.value.lower(): value for value in AttendanceType}
 _EVENT_STATUS_ALIASES = {value.value.lower(): value for value in EventStatus}

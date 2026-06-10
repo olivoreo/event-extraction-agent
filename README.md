@@ -49,9 +49,9 @@ else:
 ## Batch extraction
 
 ```python
-from event_extraction_agent import BatchExtractionSettings, ExtractionAgent, SourcePost
+from event_extraction_agent import BatchExtractionSettings, ExtractionAgent, OllamaChatClient, SourcePost
 
-agent = ExtractionAgent()
+agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
 
 posts = [
     SourcePost(text="12 июня в 18:00 пройдет лекция.", external_id="post-1"),
@@ -66,7 +66,67 @@ print([outcome.status for outcome in outcomes])
 print(result.extracted, result.skipped, result.invalid, result.llm_errors)
 ```
 
-Batch-обработка в `0.2.0` последовательная и сохраняет порядок входных постов. По умолчанию агент пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
+Batch-обработка последовательная и сохраняет порядок входных постов. По умолчанию агент пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
+
+## Настройка моделей и fallback
+
+```python
+from event_extraction_agent import (
+    ExtractionAgent,
+    ExtractionAgentConfig,
+    FallbackPolicy,
+    OllamaChatClient,
+    SourcePost,
+)
+
+main_client = OllamaChatClient(model="qwen2.5:3b")
+fallback_client = OllamaChatClient(model="qwen2.5:7b")
+
+config = ExtractionAgentConfig(
+    main_client=main_client,
+    fallback_client=fallback_client,
+    fallback_policy=FallbackPolicy.EVENT_TYPE_ONLY,
+    use_event_type_refinement=True,
+    current_datetime="2026-06-10T12:00:00+03:00",
+    request_timeout_seconds=120,
+    min_request_interval_seconds=2.1,
+    max_retries=1,
+)
+
+agent = ExtractionAgent(config=config)
+outcome = agent.extract(SourcePost(text="12 июня в 18:00 пройдет лекция."))
+
+print(outcome.raw_llm_metadata)
+```
+
+`current_datetime` передается в prompt и используется моделью для оценки актуальности и статуса мероприятия. Это поведение перенесено из исходного `event-ai-agent`, но оформлено как настройка библиотеки.
+
+`FallbackPolicy` задает, когда агент использует fallback:
+
+- `EVENT_TYPE_ONLY`: fallback применяется только для второго прохода по `event_type`.
+- `EXTRACTION_ON_LLM_ERROR`: fallback применяется для повторной extraction, если основная модель вернула `llm_error`.
+- `DISABLED`: агент не выбирает fallback автоматически.
+
+Если пользователь передает собственные `llm_client`, `fallback_llm_client` или `event_type_llm_client` напрямую в `ExtractionAgent`, они имеют приоритет над клиентами из `ExtractionAgentConfig`.
+
+Библиотека не ограничивает список нейросетей. Любой объект с методом `complete(system_prompt, user_prompt) -> str` может быть клиентом:
+
+```python
+class MyLLMClient:
+    model = "my-provider/my-model"
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        # Вызов вашего runtime, API, локальной модели или gateway.
+        return '{"is_event": false, "skip_reason": "not_event_announcement", "event": null}'
+
+
+agent = ExtractionAgent(
+    config=ExtractionAgentConfig(
+        main_client=MyLLMClient(),
+        current_datetime="2026-06-10T12:00:00+03:00",
+    )
+)
+```
 
 ## Быстрый старт с Groq
 
@@ -108,7 +168,21 @@ outcome = agent.extract(post)
 - `event`: модель `Event`, если извлечение успешно
 - `post`: исходный `SourcePost`
 - `errors`: структурированные ошибки
-- `raw_llm_metadata`: минимальные отладочные метаданные
+- `raw_llm_metadata`: отладочные метаданные по моделям, fallback policy, текущей дате prompt и LLM-попыткам
+
+`ExtractionAgentConfig` - настройки агента:
+
+- `main_model`
+- `fallback_model`
+- `main_client`
+- `fallback_client`
+- `event_type_client`
+- `fallback_policy`: `event_type_only`, `extraction_on_llm_error` или `disabled`
+- `use_event_type_refinement`
+- `current_datetime`
+- `request_timeout_seconds`
+- `min_request_interval_seconds`
+- `max_retries`
 
 `BatchExtractionSettings` - настройки batch-обработки:
 
