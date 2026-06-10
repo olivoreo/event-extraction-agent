@@ -17,7 +17,6 @@ from event_extraction_agent.models import (
     ExtractionError,
     ExtractionOutcome,
     ExtractionStatus,
-    FallbackPolicy,
     SourcePost,
 )
 from event_extraction_agent.prompts import (
@@ -241,8 +240,7 @@ class ExtractionAgent:
     def __init__(
         self,
         llm_client: LLMClient | None = None,
-        event_type_llm_client: LLMClient | None = None,
-        fallback_llm_client: LLMClient | None = None,
+        refinement_llm_client: LLMClient | None = None,
         config: ExtractionAgentConfig | None = None,
         current_datetime: str | None = None,
     ) -> None:
@@ -250,8 +248,7 @@ class ExtractionAgent:
         self.llm_client = llm_client or self.config.main_client
         if self.llm_client is None:
             raise ValueError("llm_client is required; pass it directly or set config.main_client")
-        self.fallback_llm_client = fallback_llm_client or self.config.fallback_client
-        self.event_type_llm_client = event_type_llm_client or self.config.event_type_client or self._event_type_client()
+        self.refinement_llm_client = refinement_llm_client or self.config.refinement_client or self.llm_client
         self.current_datetime = current_datetime or self.config.current_datetime
         self.rate_limiter = (
             RequestRateLimiter(self.config.min_request_interval_seconds)
@@ -261,19 +258,7 @@ class ExtractionAgent:
         self.last_metadata: dict[str, Any] = {}
 
     def extract(self, post: SourcePost) -> ExtractionOutcome:
-        main_outcome = self._extract_once(post, client=self.llm_client, stage="main_extraction")
-        if self._should_retry_extraction_with_fallback(main_outcome):
-            fallback_outcome = self._extract_once(
-                post,
-                client=self.fallback_llm_client,
-                stage="fallback_extraction",
-                previous_metadata=main_outcome.raw_llm_metadata,
-            )
-            metadata = dict(fallback_outcome.raw_llm_metadata or {})
-            metadata["fallback_used"] = True
-            metadata["fallback_reason"] = "main_extraction_llm_error"
-            return fallback_outcome.model_copy(update={"raw_llm_metadata": metadata})
-        return main_outcome
+        return self._extract_once(post, client=self.llm_client, stage="main_extraction")
 
     def _extract_once(
         self,
@@ -298,7 +283,7 @@ class ExtractionAgent:
             external_id=post.external_id,
             current_datetime=current_datetime,
             config=self.config,
-            fallback_client=self.fallback_llm_client,
+            refinement_client=self.refinement_llm_client,
             previous_metadata=previous_metadata,
         )
 
@@ -362,19 +347,6 @@ class ExtractionAgent:
             post=post,
             event=validation.event,
             metadata=self.last_metadata,
-        )
-
-    def _event_type_client(self) -> LLMClient:
-        if self.config.fallback_policy == FallbackPolicy.EVENT_TYPE_ONLY:
-            return self.fallback_llm_client or self.llm_client
-        return self.llm_client
-
-    def _should_retry_extraction_with_fallback(self, outcome: ExtractionOutcome) -> bool:
-        return (
-            self.config.fallback_policy == FallbackPolicy.EXTRACTION_ON_LLM_ERROR
-            and outcome.status == ExtractionStatus.LLM_ERROR
-            and self.fallback_llm_client is not None
-            and self.fallback_llm_client is not self.llm_client
         )
 
     def _complete(self, client: LLMClient, system_prompt: str, user_prompt: str) -> str:
@@ -493,12 +465,12 @@ class ExtractionAgent:
 
         prompt = build_event_type_classification_prompt(raw_text=raw_text, draft=copied)
         try:
-            content = self._complete(self.event_type_llm_client, EVENT_TYPE_CLASSIFICATION_PROMPT, prompt)
+            content = self._complete(self.refinement_llm_client, EVENT_TYPE_CLASSIFICATION_PROMPT, prompt)
             payload = _parse_llm_json(content)
         except Exception as exc:
             self._add_llm_attempt(
                 stage="event_type_refinement",
-                client=self.event_type_llm_client,
+                client=self.refinement_llm_client,
                 success=False,
                 error=str(exc),
             )
@@ -506,7 +478,7 @@ class ExtractionAgent:
             if event_type not in EVENT_TYPE_VALUES:
                 copied["event_type"] = "SocialEvent"
             return copied
-        self._add_llm_attempt(stage="event_type_refinement", client=self.event_type_llm_client, success=True)
+        self._add_llm_attempt(stage="event_type_refinement", client=self.refinement_llm_client, success=True)
 
         refined_event_type = payload.get("event_type")
         if refined_event_type in EVENT_TYPE_VALUES:
@@ -515,7 +487,7 @@ class ExtractionAgent:
             self.last_metadata["event_type_refinement"] = "completed"
         elif event_type not in EVENT_TYPE_VALUES:
             copied["event_type"] = "SocialEvent"
-            self.last_metadata["event_type_refinement"] = "fallback_default"
+            self.last_metadata["event_type_refinement"] = "defaulted"
         return copied
 
 
@@ -674,19 +646,18 @@ def _metadata(
     external_id: str | None,
     current_datetime: str,
     config: ExtractionAgentConfig,
-    fallback_client: LLMClient | None,
+    refinement_client: LLMClient | None,
     previous_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    active_model = _client_model_name(client, main_client, fallback_client, config)
+    active_model = _client_model_name(client, main_client, refinement_client, config)
     metadata = {
         "llm_model": active_model,
         "main_model": getattr(main_client, "model", None) or config.main_model,
-        "fallback_model": getattr(fallback_client, "model", None) or config.fallback_model,
+        "refinement_model": getattr(refinement_client, "model", None) or config.refinement_model,
         "active_model": active_model,
         "active_stage": stage,
         "external_id": external_id,
         "current_datetime": current_datetime,
-        "fallback_policy": config.fallback_policy.value,
         "event_type_refinement_enabled": config.use_event_type_refinement,
         "request_timeout_seconds": config.request_timeout_seconds,
         "min_request_interval_seconds": config.min_request_interval_seconds,
@@ -701,7 +672,7 @@ def _metadata(
 def _client_model_name(
     client: LLMClient,
     main_client: LLMClient,
-    fallback_client: LLMClient | None,
+    refinement_client: LLMClient | None,
     config: ExtractionAgentConfig,
 ) -> str | None:
     model_name = getattr(client, "model", None)
@@ -709,8 +680,8 @@ def _client_model_name(
         return model_name
     if client is main_client:
         return config.main_model
-    if fallback_client is not None and client is fallback_client:
-        return config.fallback_model
+    if refinement_client is not None and client is refinement_client:
+        return config.refinement_model
     return None
 
 

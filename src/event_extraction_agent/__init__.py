@@ -19,7 +19,6 @@ from event_extraction_agent.models import (
     ExtractionError,
     ExtractionOutcome,
     ExtractionStatus,
-    FallbackPolicy,
     SourcePost,
 )
 
@@ -36,7 +35,6 @@ __all__ = [
     "ExtractionError",
     "ExtractionOutcome",
     "ExtractionStatus",
-    "FallbackPolicy",
     "GroqChatClient",
     "LLMClient",
     "OllamaChatClient",

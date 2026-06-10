@@ -2,7 +2,7 @@
 
 `event_extraction_agent` - небольшая Python-библиотека для извлечения структурированных данных о мероприятиях из текстовых постов с помощью LLM.
 
-Версия `0.2.0` решает задачу extraction для одного подготовленного поста или пачки подготовленных постов: вы передаете `SourcePost` в настроенного агента и получаете `ExtractionOutcome` или `BatchExtractionResult`. Загрузка постов из внешних источников, хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
+Версия `0.3.0` решает задачу extraction для одного подготовленного поста или пачки подготовленных постов: вы передаете `SourcePost` в настроенного агента и получаете `ExtractionOutcome` или `BatchExtractionResult`. Основная модель и модель уточнений задаются через явный `ExtractionAgentConfig` и переданные LLM-клиенты. Загрузка постов из внешних источников, хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
 
 ## Установка
 
@@ -68,24 +68,22 @@ print(result.extracted, result.skipped, result.invalid, result.llm_errors)
 
 Batch-обработка последовательная и сохраняет порядок входных постов. По умолчанию агент пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
 
-## Настройка моделей и fallback
+## Настройка моделей и уточнений
 
 ```python
 from event_extraction_agent import (
     ExtractionAgent,
     ExtractionAgentConfig,
-    FallbackPolicy,
     OllamaChatClient,
     SourcePost,
 )
 
 main_client = OllamaChatClient(model="qwen2.5:3b")
-fallback_client = OllamaChatClient(model="qwen2.5:7b")
+refinement_client = OllamaChatClient(model="qwen2.5:7b")
 
 config = ExtractionAgentConfig(
     main_client=main_client,
-    fallback_client=fallback_client,
-    fallback_policy=FallbackPolicy.EVENT_TYPE_ONLY,
+    refinement_client=refinement_client,
     use_event_type_refinement=True,
     current_datetime="2026-06-10T12:00:00+03:00",
     request_timeout_seconds=120,
@@ -101,13 +99,9 @@ print(outcome.raw_llm_metadata)
 
 `current_datetime` передается в prompt и используется моделью для оценки актуальности и статуса мероприятия. Это поведение перенесено из исходного `event-ai-agent`, но оформлено как настройка библиотеки.
 
-`FallbackPolicy` задает, когда агент использует fallback:
+`refinement_client` - вспомогательная модель для уточнений. Сейчас библиотека использует ее только для второго прохода по `event_type`, если основной extraction вернул отсутствующий, недопустимый или слишком общий тип события (`SocialEvent`). В будущем этот же клиент можно использовать для уточнения других подозрительных полей без изменения пользовательского API.
 
-- `EVENT_TYPE_ONLY`: fallback применяется только для второго прохода по `event_type`.
-- `EXTRACTION_ON_LLM_ERROR`: fallback применяется для повторной extraction, если основная модель вернула `llm_error`.
-- `DISABLED`: агент не выбирает fallback автоматически.
-
-Если пользователь передает собственные `llm_client`, `fallback_llm_client` или `event_type_llm_client` напрямую в `ExtractionAgent`, они имеют приоритет над клиентами из `ExtractionAgentConfig`.
+Если пользователь передает собственные `llm_client` или `refinement_llm_client` напрямую в `ExtractionAgent`, они имеют приоритет над клиентами из `ExtractionAgentConfig`.
 
 Библиотека не ограничивает список нейросетей. Любой объект с методом `complete(system_prompt, user_prompt) -> str` может быть клиентом:
 
@@ -168,16 +162,14 @@ outcome = agent.extract(post)
 - `event`: модель `Event`, если извлечение успешно
 - `post`: исходный `SourcePost`
 - `errors`: структурированные ошибки
-- `raw_llm_metadata`: отладочные метаданные по моделям, fallback policy, текущей дате prompt и LLM-попыткам
+- `raw_llm_metadata`: отладочные метаданные по моделям, текущей дате prompt, refinement-проходам и LLM-попыткам
 
 `ExtractionAgentConfig` - настройки агента:
 
 - `main_model`
-- `fallback_model`
+- `refinement_model`
 - `main_client`
-- `fallback_client`
-- `event_type_client`
-- `fallback_policy`: `event_type_only`, `extraction_on_llm_error` или `disabled`
+- `refinement_client`
 - `use_event_type_refinement`
 - `current_datetime`
 - `request_timeout_seconds`
@@ -207,7 +199,7 @@ outcome = agent.extract(post)
 
 ## Текущий scope
 
-Входит в v0.2.0:
+Входит в v0.3.0:
 
 - переиспользуемый Python-пакет
 - типизированные входные и выходные модели
@@ -216,8 +208,11 @@ outcome = agent.extract(post)
 - промпты, валидация, легкое исправление ответа модели и уточнение типа события
 - последовательная batch-обработка подготовленных `SourcePost`
 - лимит ошибок, сохранение порядка, пропуск дублей и явная batch-сводка
+- `ExtractionAgentConfig` для настройки моделей, времени prompt, timeout, rate limit и retries
+- вспомогательная модель уточнений для подозрительных полей; сейчас используется для `event_type`
+- прозрачные `raw_llm_metadata` с LLM-попытками и выбранными моделями
 
-Не входит в v0.2.0:
+Не входит в v0.3.0:
 
 - загрузка постов из внешних источников
 - разбор вложений
