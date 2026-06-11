@@ -101,6 +101,35 @@ def test_extract_from_source_uses_batch_settings():
     assert result.outcomes[1].errors[0].code == "duplicate_post"
 
 
+def test_pipeline_can_run_incrementally_with_existing_outcomes():
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
+    existing_agent = ExtractionAgent(
+        llm_client=FakeLLMClient(
+            [
+                json.dumps(
+                    {
+                        "is_event": True,
+                        "skip_reason": None,
+                        "event": _event_payload(),
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+    )
+    existing_outcome = existing_agent.extract(post)
+    source = FakeSource([SourcePost(text="5 июня\nв 18:00 пройдет лекция.", external_id="post-1")])
+    agent = ExtractionAgent(llm_client=FakeLLMClient([]))
+
+    result = ExtractionPipeline(agent=agent, source=source, existing_outcomes=[existing_outcome]).run()
+
+    assert result.total == 1
+    assert result.cached == 1
+    assert result.processed == 0
+    assert result.outcomes[0].raw_llm_metadata is not None
+    assert result.outcomes[0].raw_llm_metadata["incremental_cached"] is True
+
+
 def test_pipeline_rejects_invalid_source_return_shape():
     source = FakeSource(["not a SourcePost"])
     agent = ExtractionAgent(llm_client=FakeLLMClient([]))

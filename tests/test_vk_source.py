@@ -43,7 +43,7 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
                             "id": 10,
                             "owner_id": -123,
                             "date": 1_780_000_000,
-                            "text": "  5 июня   в 18:00 пройдет лекция.  ",
+                            "text": "  🎭 5 июня\n  в 18:00   пройдет лекция 😊.  ",
                             "attachments": [
                                 {"type": "link", "link": {"title": "Не отправлять в агент"}},
                             ],
@@ -76,8 +76,11 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
 
     assert len(posts) == 1
     assert isinstance(posts[0], SourcePost)
-    assert posts[0].text == "5 июня в 18:00 пройдет лекция."
-    assert "Не отправлять в агент" not in posts[0].text
+    assert posts[0].text == "🎭 5 июня\n  в 18:00   пройдет лекция 😊."
+    assert posts[0].raw_text == "5 июня в 18:00 пройдет лекция."
+    assert "🎭" not in posts[0].raw_text
+    assert "\n" not in posts[0].raw_text
+    assert "Не отправлять в агент" not in posts[0].raw_text
     assert posts[0].source_name == "Лекторий"
     assert posts[0].source_url == "https://vk.com/wall-123_10"
     assert posts[0].external_id == "vk:wall-123_10"
@@ -121,7 +124,7 @@ def test_vk_source_fetches_multiple_sources(monkeypatch):
     posts = VKSource(access_token="secret", sources=["first", "second"], posts_per_source_limit=1).fetch_posts()
 
     assert requested_sources == ["first", "second"]
-    assert [post.text for post in posts] == ["Пост 1", "Пост 2"]
+    assert [post.raw_text for post in posts] == ["Пост 1", "Пост 2"]
     assert [post.external_id for post in posts] == ["vk:wall-1_1", "vk:wall-2_2"]
 
 

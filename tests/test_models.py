@@ -36,6 +36,15 @@ def test_source_post_rejects_blank_text():
         SourcePost(text="  ")
 
 
+def test_source_post_uses_raw_text_for_prompt_when_present():
+    post = SourcePost(text=" Исходный\nтекст ", raw_text=" Очищенный текст ")
+
+    assert post.text == "Исходный\nтекст"
+    assert post.raw_text == "Очищенный текст"
+    assert post.raw_text_for_prompt() == "Очищенный текст"
+    assert SourcePost(text="Только текст").raw_text_for_prompt() == "Только текст"
+
+
 def test_event_validates_contract_fields():
     event = Event(**VALID_EVENT_DATA)
 

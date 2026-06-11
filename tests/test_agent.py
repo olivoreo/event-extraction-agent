@@ -70,6 +70,30 @@ def test_extract_returns_outcome_with_event():
     ]
 
 
+def test_extract_sends_raw_text_to_llm_when_present():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-06-05T18:00:00+03:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+    post = SourcePost(
+        text="🎭 5 июня\nв 18:00 пройдет лекция 😊.",
+        raw_text="5 июня в 18:00 пройдет лекция.",
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(post)
+
+    assert "5 июня в 18:00 пройдет лекция." in client.calls[0][1]
+    assert "🎭" not in client.calls[0][1]
+    assert outcome.event is not None
+    assert outcome.event.raw_text == "5 июня в 18:00 пройдет лекция."
+
+
 def test_agent_can_take_main_client_from_config():
     client = FakeLLMClient(
         json.dumps(
@@ -378,6 +402,75 @@ def test_extract_batch_returns_summary_and_applies_error_limit():
     assert len(client.calls) == 1
 
 
+def test_extract_incremental_reuses_unchanged_outcomes_and_processes_changed_posts():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-06-07T18:00:00+03:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+    cached_post = SourcePost(
+        text="🎭 5 июня\nв 18:00 пройдет лекция.",
+        raw_text="5 июня в 18:00 пройдет лекция.",
+        external_id="vk:wall-1_1",
+    )
+    changed_post = SourcePost(text="Старый текст 6 июня в 18:00.", external_id="vk:wall-1_2")
+    existing = [
+        ExtractionAgent(llm_client=FakeLLMClient(_event_response("2026-06-05T18:00:00+03:00"))).extract(cached_post),
+        ExtractionAgent(llm_client=FakeLLMClient(_event_response("2026-06-06T18:00:00+03:00"))).extract(changed_post),
+    ]
+    posts = [
+        SourcePost(text="5 июня\nв 18:00   пройдет лекция.", raw_text="5 июня в 18:00 пройдет лекция.", external_id="vk:wall-1_1"),
+        SourcePost(text="Новый текст 7 июня в 18:00.", external_id="vk:wall-1_2"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_incremental(posts, existing)
+
+    assert len(client.calls) == 1
+    assert result.total == 2
+    assert result.cached == 1
+    assert result.processed == 1
+    assert result.outcomes[0].raw_llm_metadata is not None
+    assert result.outcomes[0].raw_llm_metadata["incremental_cached"] is True
+    assert result.outcomes[0].post == posts[0]
+    assert result.outcomes[1].event is not None
+    assert result.outcomes[1].event.start_at.isoformat() == "2026-06-07T18:00:00+03:00"
+
+
+def test_extract_incremental_retries_cached_llm_errors_by_default():
+    client = FakeLLMClient(_event_response("2026-06-05T18:00:00+03:00"))
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="vk:wall-1_1")
+    existing = [
+        ExtractionAgent(llm_client=FakeLLMClient("не json")).extract(post),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_incremental([post], existing)
+
+    assert len(client.calls) == 1
+    assert result.cached == 0
+    assert result.processed == 1
+    assert result.outcomes[0].status == ExtractionStatus.EXTRACTED
+
+
+def test_extract_incremental_can_keep_cached_llm_errors():
+    client = FakeLLMClient(_event_response("2026-06-05T18:00:00+03:00"))
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="vk:wall-1_1")
+    existing = [
+        ExtractionAgent(llm_client=FakeLLMClient("не json")).extract(post),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_incremental([post], existing, retry_llm_errors=False)
+
+    assert len(client.calls) == 0
+    assert result.cached == 1
+    assert result.processed == 0
+    assert result.outcomes[0].status == ExtractionStatus.LLM_ERROR
+
+
 def _event_payload(start_at: str | None) -> dict[str, object]:
     return {
         "title": "Мисс и Мистер Студенчество",
@@ -402,3 +495,14 @@ def _event_payload(start_at: str | None) -> dict[str, object]:
         "target_audience_text": None,
         "seniority_level": "legacy",
     }
+
+
+def _event_response(start_at: str) -> str:
+    return json.dumps(
+        {
+            "is_event": True,
+            "skip_reason": None,
+            "event": _event_payload(start_at=start_at),
+        },
+        ensure_ascii=False,
+    )

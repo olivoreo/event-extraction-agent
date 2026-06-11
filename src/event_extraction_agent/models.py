@@ -153,17 +153,20 @@ class SourcePost(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str
+    raw_text: str | None = None
     source_name: str | None = None
     source_url: str | None = None
     published_at: datetime | str | None = None
     external_id: str | None = None
 
-    @field_validator("text")
+    @field_validator("text", "raw_text")
     @classmethod
-    def text_must_not_be_blank(cls, value: str) -> str:
+    def required_text_must_not_be_blank(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
-            raise ValueError("text must not be blank")
+            raise ValueError(f"{info.field_name} must not be blank")
         return normalized
 
     @field_validator("source_name", "source_url", "external_id")
@@ -180,6 +183,9 @@ class SourcePost(BaseModel):
         if isinstance(self.published_at, datetime):
             return self.published_at.isoformat()
         return self.published_at
+
+    def raw_text_for_prompt(self) -> str:
+        return self.raw_text or self.text
 
 
 class Event(BaseModel):
@@ -303,6 +309,8 @@ class BatchExtractionResult(BaseModel):
     skipped: int = 0
     invalid: int = 0
     llm_errors: int = 0
+    cached: int = 0
+    processed: int = 0
     error_count: int = 0
     error_limit_reached: bool = False
 
@@ -317,6 +325,7 @@ class BatchExtractionResult(BaseModel):
         skipped = _count_status(outcomes, ExtractionStatus.SKIPPED)
         invalid = _count_status(outcomes, ExtractionStatus.INVALID)
         llm_errors = _count_status(outcomes, ExtractionStatus.LLM_ERROR)
+        cached = sum(1 for outcome in outcomes if (outcome.raw_llm_metadata or {}).get("incremental_cached") is True)
         return cls(
             settings=settings or BatchExtractionSettings(),
             outcomes=outcomes,
@@ -325,6 +334,8 @@ class BatchExtractionResult(BaseModel):
             skipped=skipped,
             invalid=invalid,
             llm_errors=llm_errors,
+            cached=cached,
+            processed=len(outcomes) - cached,
             error_count=invalid + llm_errors,
             error_limit_reached=error_limit_reached,
         )

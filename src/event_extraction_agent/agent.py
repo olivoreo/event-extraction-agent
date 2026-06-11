@@ -268,8 +268,9 @@ class ExtractionAgent:
         previous_metadata: dict[str, Any] | None = None,
     ) -> ExtractionOutcome:
         current_datetime = self.current_datetime or _current_datetime()
+        raw_text = post.raw_text_for_prompt()
         prompt = build_extraction_prompt(
-            raw_text=post.text,
+            raw_text=raw_text,
             source_name=post.source_name,
             source_url=post.source_url,
             published_at=post.published_at_for_prompt(),
@@ -322,13 +323,13 @@ class ExtractionAgent:
 
         event_payload = _repair_event_payload(
             event_payload,
-            raw_text=post.text,
+            raw_text=raw_text,
             published_at=post.published_at_for_prompt(),
         )
-        event_payload = self._refine_event_type(event_payload, raw_text=post.text)
+        event_payload = self._refine_event_type(event_payload, raw_text=raw_text)
         event_payload = _with_source_metadata(
             event_payload,
-            raw_text=post.text,
+            raw_text=raw_text,
             source_name=post.source_name,
             source_url=post.source_url,
         )
@@ -394,7 +395,7 @@ class ExtractionAgent:
         error_limit_reached = False
 
         for index, post in enumerate(posts):
-            if _is_blank_text(post.text) and batch_settings.skip_empty:
+            if _is_blank_text(post.raw_text_for_prompt()) and batch_settings.skip_empty:
                 outcomes.append(
                     _outcome(
                         status=ExtractionStatus.SKIPPED,
@@ -444,6 +445,46 @@ class ExtractionAgent:
             outcomes,
             settings=batch_settings,
             error_limit_reached=error_limit_reached,
+        )
+
+    def extract_incremental(
+        self,
+        posts: list[SourcePost],
+        existing_outcomes: list[ExtractionOutcome],
+        settings: BatchExtractionSettings | None = None,
+        retry_llm_errors: bool = True,
+    ) -> BatchExtractionResult:
+        existing_index = _existing_outcomes_index(existing_outcomes)
+        pending_posts: list[SourcePost] = []
+        pending_positions: list[int] = []
+        outcomes: list[ExtractionOutcome | None] = [None] * len(posts)
+
+        for index, post in enumerate(posts):
+            existing_outcome = _matching_existing_outcome(post, existing_index)
+            if existing_outcome is None:
+                pending_positions.append(index)
+                pending_posts.append(post)
+                continue
+
+            if retry_llm_errors and existing_outcome.status == ExtractionStatus.LLM_ERROR:
+                pending_positions.append(index)
+                pending_posts.append(post)
+                continue
+
+            outcomes[index] = _cached_outcome(existing_outcome, post, source_index=index)
+
+        if pending_posts:
+            processed_result = self.extract_batch(pending_posts, settings=settings)
+            for pending_index, outcome in enumerate(processed_result.outcomes):
+                source_index = pending_positions[pending_index]
+                metadata = dict(outcome.raw_llm_metadata or {})
+                metadata["incremental_cached"] = False
+                metadata["source_index"] = source_index
+                outcomes[source_index] = outcome.model_copy(update={"raw_llm_metadata": metadata})
+
+        return BatchExtractionResult.from_outcomes(
+            [outcome for outcome in outcomes if outcome is not None],
+            settings=settings,
         )
 
     def extract_event(self, post: SourcePost) -> Event:
@@ -596,7 +637,46 @@ def _is_blank_text(value: str) -> bool:
 def _post_deduplication_key(post: SourcePost) -> str:
     if post.external_id:
         return f"external_id:{post.external_id}"
-    return "text:" + " ".join(post.text.casefold().split())
+    return "text:" + " ".join(post.raw_text_for_prompt().casefold().split())
+
+
+def _existing_outcomes_index(outcomes: list[ExtractionOutcome]) -> dict[str, ExtractionOutcome]:
+    index: dict[str, ExtractionOutcome] = {}
+    for outcome in outcomes:
+        external_id = outcome.post.external_id
+        if external_id is not None:
+            index[external_id] = outcome
+    return index
+
+
+def _matching_existing_outcome(
+    post: SourcePost,
+    existing_index: dict[str, ExtractionOutcome],
+) -> ExtractionOutcome | None:
+    if post.external_id is None:
+        return None
+
+    existing_outcome = existing_index.get(post.external_id)
+    if existing_outcome is None:
+        return None
+
+    if _normalized_incremental_text(existing_outcome.post.raw_text_for_prompt()) != _normalized_incremental_text(
+        post.raw_text_for_prompt()
+    ):
+        return None
+
+    return existing_outcome
+
+
+def _cached_outcome(existing_outcome: ExtractionOutcome, post: SourcePost, source_index: int) -> ExtractionOutcome:
+    metadata = dict(existing_outcome.raw_llm_metadata or {})
+    metadata["incremental_cached"] = True
+    metadata["source_index"] = source_index
+    return existing_outcome.model_copy(update={"post": post, "raw_llm_metadata": metadata})
+
+
+def _normalized_incremental_text(value: str) -> str:
+    return " ".join(value.split())
 
 
 def _coerce_prompt_enum(payload: dict[str, Any], field: str, allowed_values: tuple[str, ...]) -> None:

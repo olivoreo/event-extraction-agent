@@ -2,7 +2,7 @@
 
 `event_extraction_agent` - небольшая Python-библиотека для извлечения структурированных данных о мероприятиях из текстовых постов с помощью LLM.
 
-Версия `0.4.0` решает задачу extraction для одного подготовленного поста или пачки подготовленных постов: вы передаете `SourcePost` в настроенного агента и получаете `ExtractionOutcome` или `BatchExtractionResult`. Основная модель и модель уточнений задаются через явный `ExtractionAgentConfig` и переданные LLM-клиенты. Также добавлена архитектурная основа источников через `SourceAdapter` и `ExtractionPipeline`. Готовые адаптеры внешних источников, хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
+Версия `0.4.0` решает задачу extraction для одного подготовленного поста или пачки подготовленных постов: вы передаете `SourcePost` в настроенного агента и получаете `ExtractionOutcome` или `BatchExtractionResult`. Основная модель и модель уточнений задаются через явный `ExtractionAgentConfig` и переданные LLM-клиенты. Также добавлены `SourceAdapter`, `ExtractionPipeline`, incremental processing и production-адаптер `VKSource`. Хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
 
 ## Установка
 
@@ -32,6 +32,7 @@ agent = ExtractionAgent(llm_client=client)
 
 post = SourcePost(
     text="12 июня в 18:00 в городском лектории пройдет открытая лекция.",
+    raw_text="12 июня в 18:00 в городском лектории пройдет открытая лекция.",
     source_name="Example source",
     source_url="https://example.com/posts/123",
     published_at="2026-06-01T10:00:00+03:00",
@@ -67,6 +68,34 @@ print(result.extracted, result.skipped, result.invalid, result.llm_errors)
 ```
 
 Batch-обработка последовательная и сохраняет порядок входных постов. По умолчанию агент пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
+
+## Incremental processing
+
+```python
+posts = source.fetch_posts()
+previous_result = load_previous_result_somehow()
+
+result = agent.extract_incremental(
+    posts,
+    existing_outcomes=previous_result.outcomes,
+)
+
+print(result.cached, result.processed)
+```
+
+Incremental-режим пропускает LLM extraction, если у нового поста совпали `external_id` и нормализованный текст для LLM (`raw_text`, если он задан, иначе `text`) с предыдущим `ExtractionOutcome`. Если предыдущий результат был `llm_error`, пост по умолчанию обрабатывается повторно.
+
+То же можно использовать через pipeline:
+
+```python
+pipeline = ExtractionPipeline(
+    agent=agent,
+    source=source,
+    existing_outcomes=previous_result.outcomes,
+)
+
+result = pipeline.run()
+```
 
 ## Source adapters и pipeline
 
@@ -126,9 +155,9 @@ agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
 result = ExtractionPipeline(agent=agent, source=source).run()
 ```
 
-`VKSource` принимает токен строкой и не читает `.env`. Источники можно задавать как URL, `club...`, `public...`, домены или числовые `owner_id`. Адаптер получает посты через `wall.get`, берет только текст поста и полезные метаданные (`source_name`, `source_url`, `published_at`, `external_id`) и приводит их к `SourcePost`.
+`VKSource` принимает токен строкой и не читает `.env`. Источники можно задавать как URL, `club...`, `public...`, домены или числовые `owner_id`. Адаптер получает посты через `wall.get`, сохраняет исходный текст поста в `SourcePost.text`, очищенный текст для LLM в `SourcePost.raw_text`, добавляет полезные метаданные (`source_name`, `source_url`, `published_at`, `external_id`) и приводит все к `SourcePost`.
 
-Вложения не передаются в агент. Если VK-пост не содержит текста, адаптер его пропускает.
+Вложения не передаются в агент. Если VK-пост не содержит текста после очистки, адаптер его пропускает. `raw_text` очищается от emoji, переносов строк и лишних пробелов.
 
 ## Настройка моделей и уточнений
 
@@ -211,12 +240,13 @@ outcome = agent.extract(post)
 `SourcePost` - входная модель поста:
 
 - `text`
+- `raw_text`
 - `source_name`
 - `source_url`
 - `published_at`
 - `external_id`
 
-Обязательное поле только `text`. Остальные поля опциональны, но полезны для трассировки результата и восстановления даты события, если в тексте указан день и месяц без года.
+Обязательное поле только `text`. `raw_text` опционален и используется как очищенный текст для LLM. Если `raw_text` не задан, агент использует `text`. Остальные поля опциональны, но полезны для трассировки результата и восстановления даты события, если в тексте указан день и месяц без года.
 
 `ExtractionOutcome` - результат работы агента:
 
@@ -275,6 +305,8 @@ outcome = agent.extract(post)
 - `skipped`
 - `invalid`
 - `llm_errors`
+- `cached`
+- `processed`
 - `error_count`
 - `error_limit_reached`
 
@@ -291,6 +323,7 @@ outcome = agent.extract(post)
 - промпты, валидация, легкое исправление ответа модели и уточнение типа события
 - последовательная batch-обработка подготовленных `SourcePost`
 - лимит ошибок, сохранение порядка, пропуск дублей и явная batch-сводка
+- incremental processing по `external_id` и нормализованному тексту для LLM
 - `ExtractionAgentConfig` для настройки моделей, времени prompt, timeout, rate limit и retries
 - вспомогательная модель уточнений для подозрительных полей; сейчас используется для `event_type`
 - прозрачные `raw_llm_metadata` с LLM-попытками и выбранными моделями
@@ -307,10 +340,11 @@ outcome = agent.extract(post)
 - хранение в базе данных
 - FastAPI/backend routes
 - scheduled jobs
-- batch JSON import/export и source-specific ingestion
+- batch JSON import/export
+- custom source-specific ingestion за пределами готового `VKSource`
 - локальные ML-классификаторы
 
-Приложение, которое использует этот пакет, отвечает за конфигурацию, секреты, хранение данных и source-specific ingestion.
+Приложение, которое использует этот пакет, отвечает за конфигурацию, секреты, хранение данных и свои дополнительные source adapters.
 
 ## Происхождение пакета
 

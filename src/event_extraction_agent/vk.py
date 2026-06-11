@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,23 @@ from event_extraction_agent.models import SourcePost
 VK_API_BASE_URL = "https://api.vk.com/method"
 VK_DEFAULT_API_VERSION = "5.199"
 VK_MAX_WALL_GET_COUNT = 100
+_SPACE_BEFORE_PUNCTUATION_RE = re.compile(r"\s+([,.:;!?])")
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001f1e6-\U0001f1ff"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f600-\U0001f64f"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001fa6f"
+    "\U0001fa70-\U0001faff"
+    "\u2600-\u27bf"
+    "\ufe0f"
+    "]+"
+)
 
 
 class VKApiError(RuntimeError):
@@ -230,7 +248,8 @@ def _to_source_post(
         return None
 
     return SourcePost(
-        text=normalized_text,
+        text=text,
+        raw_text=normalized_text,
         source_name=_resolve_source_name(owner_id, source, sources_by_owner_id),
         source_url=build_vk_post_url(owner_id, post_id),
         published_at=_unix_to_iso(item.get("date") if isinstance(item.get("date"), int) else None),
@@ -335,4 +354,5 @@ def _resolve_source_name(
 def _clean_text(text: str | None) -> str:
     if not text:
         return ""
-    return " ".join(text.split())
+    compacted = " ".join(_EMOJI_RE.sub("", text).split())
+    return _SPACE_BEFORE_PUNCTUATION_RE.sub(r"\1", compacted)
