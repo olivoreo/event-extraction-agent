@@ -23,6 +23,14 @@ from event_extraction_agent.models import (
 )
 from event_extraction_agent.pipeline import ExtractionPipeline, extract_from_source
 from event_extraction_agent.sources import SourceAdapter
+from event_extraction_agent.vk import (
+    VKApiClient,
+    VKApiError,
+    VKPostSource,
+    VKSource,
+    build_vk_post_url,
+    parse_vk_source,
+)
 
 __all__ = [
     "AttendanceType",
@@ -45,4 +53,10 @@ __all__ = [
     "RequestRateLimiter",
     "SourceAdapter",
     "SourcePost",
+    "VKApiClient",
+    "VKApiError",
+    "VKPostSource",
+    "VKSource",
+    "build_vk_post_url",
+    "parse_vk_source",
 ]

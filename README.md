@@ -106,6 +106,30 @@ from event_extraction_agent import extract_from_source
 result = extract_from_source(source=MySource(), agent=agent)
 ```
 
+## VK source
+
+```python
+from event_extraction_agent import ExtractionAgent, ExtractionPipeline, OllamaChatClient, VKSource
+
+source = VKSource(
+    access_token="vk-service-token",
+    sources=[
+        "https://vk.com/club123",
+        "public456",
+        "my_community_domain",
+        -789,
+    ],
+    posts_per_source_limit=20,
+)
+
+agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
+result = ExtractionPipeline(agent=agent, source=source).run()
+```
+
+`VKSource` принимает токен строкой и не читает `.env`. Источники можно задавать как URL, `club...`, `public...`, домены или числовые `owner_id`. Адаптер получает посты через `wall.get`, берет только текст поста и полезные метаданные (`source_name`, `source_url`, `published_at`, `external_id`) и приводит их к `SourcePost`.
+
+Вложения не передаются в агент. Если VK-пост не содержит текста, адаптер его пропускает.
+
 ## Настройка моделей и уточнений
 
 ```python
@@ -224,6 +248,17 @@ outcome = agent.extract(post)
 - передает их в `ExtractionAgent.extract_batch`
 - возвращает `BatchExtractionResult`
 
+`VKSource` - готовый source adapter для VK:
+
+- `access_token`
+- `sources`
+- `posts_per_source_limit`
+- `offset`
+- `wall_filter`
+- `api_version`
+- `timeout_seconds`
+- `batch_size`
+
 `BatchExtractionSettings` - настройки batch-обработки:
 
 - `mode`: сейчас только `sequential`
@@ -261,10 +296,13 @@ outcome = agent.extract(post)
 - прозрачные `raw_llm_metadata` с LLM-попытками и выбранными моделями
 - `SourceAdapter` как протокол источников
 - `ExtractionPipeline` и `extract_from_source` для связки источника и агента
+- production-адаптер `VKSource` для текстовых постов VK
 
 Не входит в v0.4.0:
 
-- готовые адаптеры внешних источников, включая VK
+- отправка VK-вложений в агент
+- чтение токенов или источников из `.env`
+- адаптеры внешних источников, кроме VK
 - разбор вложений
 - хранение в базе данных
 - FastAPI/backend routes
