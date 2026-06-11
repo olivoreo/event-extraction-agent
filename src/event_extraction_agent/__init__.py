@@ -21,6 +21,8 @@ from event_extraction_agent.models import (
     ExtractionStatus,
     SourcePost,
 )
+from event_extraction_agent.pipeline import ExtractionPipeline, extract_from_source
+from event_extraction_agent.sources import SourceAdapter
 
 __all__ = [
     "AttendanceType",
@@ -35,9 +37,12 @@ __all__ = [
     "ExtractionError",
     "ExtractionOutcome",
     "ExtractionStatus",
+    "ExtractionPipeline",
+    "extract_from_source",
     "GroqChatClient",
     "LLMClient",
     "OllamaChatClient",
     "RequestRateLimiter",
+    "SourceAdapter",
     "SourcePost",
 ]
