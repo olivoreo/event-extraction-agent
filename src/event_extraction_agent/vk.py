@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time as time_module
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +16,9 @@ from event_extraction_agent.models import SourcePost
 VK_API_BASE_URL = "https://api.vk.com/method"
 VK_DEFAULT_API_VERSION = "5.199"
 VK_MAX_WALL_GET_COUNT = 100
+VK_DEFAULT_RATE_LIMIT_PER_SECOND = 20.0
+VK_DEFAULT_MAX_RETRIES = 3
+_VK_RETRYABLE_ERROR_CODES = {1, 6, 9, 10, 29}
 _SPACE_BEFORE_PUNCTUATION_RE = re.compile(r"\s+([,.:;!?])")
 _EMOJI_RE = re.compile(
     "["
@@ -42,20 +47,66 @@ class VKApiError(RuntimeError):
         *,
         code: int | None = None,
         details: dict[str, Any] | None = None,
+        method: str | None = None,
+        source: "VKPostSource | None" = None,
+        retryable: bool = False,
     ) -> None:
-        super().__init__(message)
+        self.message = message
         self.code = code
         self.details = details or {}
+        self.method = method
+        self.source = source
+        self.retryable = retryable
+        super().__init__(self._format_message())
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "VKApiError":
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        method: str | None = None,
+        source: "VKPostSource | None" = None,
+    ) -> "VKApiError":
         error = payload.get("error", {})
         if not isinstance(error, dict):
-            return cls("VK API returned an unknown error", details=payload)
+            return cls(
+                "VK API returned an unknown error",
+                details=payload,
+                method=method,
+                source=source,
+            )
 
         code = error.get("error_code")
         message = error.get("error_msg") or "VK API returned an error"
-        return cls(str(message), code=code if isinstance(code, int) else None, details=error)
+        safe_code = code if isinstance(code, int) else None
+        return cls(
+            str(message),
+            code=safe_code,
+            details=error,
+            method=method,
+            source=source,
+            retryable=safe_code in _VK_RETRYABLE_ERROR_CODES,
+        )
+
+    def with_source(self, source: "VKPostSource") -> "VKApiError":
+        return VKApiError(
+            self.message,
+            code=self.code,
+            details=self.details,
+            method=self.method,
+            source=source,
+            retryable=self.retryable,
+        )
+
+    def _format_message(self) -> str:
+        parts = [self.message]
+        if self.code is not None:
+            parts.append(f"code={self.code}")
+        if self.method:
+            parts.append(f"method={self.method}")
+        if self.source is not None:
+            parts.append(f"source={self.source.reference}")
+        return "VK API error: " + "; ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -66,12 +117,57 @@ class VKPostSource:
     domain: str | None = None
     source_name: str | None = None
 
+    @property
+    def reference(self) -> str:
+        if self.owner_id is not None:
+            return str(self.owner_id)
+        if self.domain:
+            return self.domain
+        return "<unknown>"
+
     def to_wall_get_params(self) -> dict[str, Any]:
         if self.owner_id is not None:
             return {"owner_id": self.owner_id}
         if self.domain:
             return {"domain": self.domain}
         raise ValueError("VK source must include owner_id or domain")
+
+
+@dataclass(frozen=True)
+class VKFetchResult:
+    """Posts fetched from VK together with per-source failures."""
+
+    posts: list[SourcePost]
+    errors: list[VKApiError]
+
+
+class _RequestRateLimiter:
+    def __init__(
+        self,
+        rate_limit_per_second: float | None,
+        *,
+        sleep: Any = time_module.sleep,
+        monotonic: Any = time_module.monotonic,
+    ) -> None:
+        if rate_limit_per_second is None or rate_limit_per_second <= 0:
+            self.min_interval_seconds = 0.0
+        else:
+            self.min_interval_seconds = 1.0 / rate_limit_per_second
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._next_allowed_at = 0.0
+
+    def wait(self) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        with self._lock:
+            now = self._monotonic()
+            delay = self._next_allowed_at - now
+            if delay > 0:
+                self._sleep(delay)
+                now = self._monotonic()
+            self._next_allowed_at = now + self.min_interval_seconds
 
 
 class VKApiClient:
@@ -84,6 +180,11 @@ class VKApiClient:
         api_version: str = VK_DEFAULT_API_VERSION,
         base_url: str = VK_API_BASE_URL,
         timeout_seconds: float = 10.0,
+        rate_limit_per_second: float | None = VK_DEFAULT_RATE_LIMIT_PER_SECOND,
+        max_retries: int = VK_DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = 1.0,
+        sleep: Any = time_module.sleep,
+        monotonic: Any = time_module.monotonic,
     ) -> None:
         if not access_token:
             raise ValueError("VK access token is required")
@@ -92,8 +193,22 @@ class VKApiClient:
         self.api_version = api_version
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, max_retries)
+        self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self._sleep = sleep
+        self.rate_limiter = _RequestRateLimiter(
+            rate_limit_per_second,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
 
-    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        source: VKPostSource | None = None,
+    ) -> dict[str, Any]:
         request_params = dict(params or {})
         request_params["access_token"] = self.access_token
         request_params["v"] = self.api_version
@@ -101,24 +216,74 @@ class VKApiClient:
         url = f"{self.base_url}/{method}?{urlencode(request_params, doseq=True)}"
         request = Request(url, headers={"User-Agent": "event-extraction-agent-vk-source/0.4"})
 
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as error:
-            raise VKApiError(f"VK API HTTP error: {error.code}", code=error.code) from error
-        except URLError as error:
-            raise VKApiError(f"VK API connection error: {error.reason}") from error
-        except json.JSONDecodeError as error:
-            raise VKApiError("VK API returned invalid JSON") from error
+        last_error: VKApiError | None = None
+        for attempt in range(self.max_retries + 1):
+            self.rate_limiter.wait()
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                api_error = VKApiError(
+                    f"HTTP request failed with status {error.code}",
+                    code=error.code,
+                    method=method,
+                    source=source,
+                    retryable=_is_retryable_http_status(error.code),
+                )
+                if not api_error.retryable or attempt >= self.max_retries:
+                    raise api_error from error
+                last_error = api_error
+                self._sleep_before_retry(attempt, error)
+                continue
+            except URLError as error:
+                api_error = VKApiError(
+                    f"connection failed: {error.reason}",
+                    method=method,
+                    source=source,
+                    retryable=True,
+                )
+                if attempt >= self.max_retries:
+                    raise api_error from error
+                last_error = api_error
+                self._sleep_before_retry(attempt)
+                continue
+            except json.JSONDecodeError as error:
+                raise VKApiError("returned invalid JSON", method=method, source=source) from error
 
-        if "error" in payload:
-            raise VKApiError.from_payload(payload)
+            if "error" in payload:
+                api_error = VKApiError.from_payload(payload, method=method, source=source)
+                if not api_error.retryable or attempt >= self.max_retries:
+                    raise api_error
+                last_error = api_error
+                self._sleep_before_retry(attempt)
+                continue
 
-        response_payload = payload.get("response")
-        if not isinstance(response_payload, dict):
-            raise VKApiError("VK API response does not contain an object response", details=payload)
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, dict):
+                raise VKApiError(
+                    "response does not contain an object response",
+                    details=payload,
+                    method=method,
+                    source=source,
+                )
 
-        return response_payload
+            return response_payload
+
+        if last_error is not None:
+            raise last_error
+        raise VKApiError("request failed", method=method, source=source)
+
+    def _sleep_before_retry(self, attempt: int, error: HTTPError | None = None) -> None:
+        retry_after = error.headers.get("Retry-After") if error is not None and error.headers is not None else None
+        if retry_after:
+            try:
+                delay = max(0.0, float(retry_after))
+            except ValueError:
+                delay = 0.0
+        else:
+            delay = min(30.0, self.retry_backoff_seconds * (2.0**attempt))
+        if delay > 0:
+            self._sleep(delay)
 
     def get_wall(
         self,
@@ -137,7 +302,7 @@ class VKApiClient:
             "filter": wall_filter,
             "extended": 1 if extended else 0,
         }
-        return self.call("wall.get", params)
+        return self.call("wall.get", params, source=source)
 
 
 class VKSource:
@@ -155,6 +320,12 @@ class VKSource:
         base_url: str = VK_API_BASE_URL,
         timeout_seconds: float = 10.0,
         batch_size: int = VK_MAX_WALL_GET_COUNT,
+        continue_on_source_error: bool = True,
+        rate_limit_per_second: float | None = VK_DEFAULT_RATE_LIMIT_PER_SECOND,
+        max_retries: int = VK_DEFAULT_MAX_RETRIES,
+        retry_backoff_seconds: float = 1.0,
+        sleep: Any = time_module.sleep,
+        monotonic: Any = time_module.monotonic,
     ) -> None:
         if not sources:
             raise ValueError("VKSource requires at least one source")
@@ -164,18 +335,37 @@ class VKSource:
         self.offset = max(0, offset)
         self.wall_filter = wall_filter
         self.batch_size = max(1, min(batch_size, VK_MAX_WALL_GET_COUNT))
+        self.continue_on_source_error = continue_on_source_error
+        self.errors: list[VKApiError] = []
         self.api_client = VKApiClient(
             access_token=access_token,
             api_version=api_version,
             base_url=base_url,
             timeout_seconds=timeout_seconds,
+            rate_limit_per_second=rate_limit_per_second,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            sleep=sleep,
+            monotonic=monotonic,
         )
 
     def fetch_posts(self) -> list[SourcePost]:
+        return self.fetch_posts_with_errors().posts
+
+    def fetch_posts_with_errors(self) -> VKFetchResult:
         posts: list[SourcePost] = []
+        errors: list[VKApiError] = []
         for source in self.sources:
-            posts.extend(self._fetch_source_posts(source))
-        return posts
+            try:
+                posts.extend(self._fetch_source_posts(source))
+            except VKApiError as error:
+                source_error = error if error.source is not None else error.with_source(source)
+                errors.append(source_error)
+                if not self.continue_on_source_error:
+                    self.errors = errors
+                    raise source_error from error
+        self.errors = errors
+        return VKFetchResult(posts=posts, errors=errors)
 
     def _fetch_source_posts(self, source: VKPostSource) -> list[SourcePost]:
         remaining = self.posts_per_source_limit
@@ -233,6 +423,10 @@ def parse_vk_source(source: VKPostSource | str | int) -> VKPostSource:
 
 def build_vk_post_url(owner_id: int, post_id: int) -> str:
     return f"https://vk.com/wall{owner_id}_{post_id}"
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
 
 
 def _to_source_post(

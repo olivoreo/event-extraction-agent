@@ -70,6 +70,7 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
         sources=["https://vk.com/club123"],
         posts_per_source_limit=2,
         timeout_seconds=7,
+        rate_limit_per_second=None,
     )
 
     posts = source.fetch_posts()
@@ -121,23 +122,158 @@ def test_vk_source_fetches_multiple_sources(monkeypatch):
 
     monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
 
-    posts = VKSource(access_token="secret", sources=["first", "second"], posts_per_source_limit=1).fetch_posts()
+    posts = VKSource(
+        access_token="secret",
+        sources=["first", "second"],
+        posts_per_source_limit=1,
+        rate_limit_per_second=None,
+    ).fetch_posts()
 
     assert requested_sources == ["first", "second"]
     assert [post.raw_text for post in posts] == ["Пост 1", "Пост 2"]
     assert [post.external_id for post in posts] == ["vk:wall-1_1", "vk:wall-2_2"]
 
 
-def test_vk_source_raises_api_error(monkeypatch):
+def test_vk_source_keeps_source_error_and_continues_with_available_sources(monkeypatch):
+    def fake_urlopen(request, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        if query.get("domain") == ["broken"]:
+            return FakeResponse({"error": {"error_code": 5, "error_msg": "User authorization failed"}})
+        return FakeResponse(
+            {
+                "response": {
+                    "items": [
+                        {
+                            "id": 1,
+                            "owner_id": -2,
+                            "date": None,
+                            "text": "Доступный пост",
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    source = VKSource(
+        access_token="secret",
+        sources=["broken", "available"],
+        posts_per_source_limit=1,
+        rate_limit_per_second=None,
+    )
+
+    result = source.fetch_posts_with_errors()
+
+    assert [post.raw_text for post in result.posts] == ["Доступный пост"]
+    assert len(result.errors) == 1
+    assert source.errors == result.errors
+    assert result.errors[0].code == 5
+    assert result.errors[0].source == VKPostSource(domain="broken")
+    assert "source=broken" in str(result.errors[0])
+
+
+def test_vk_source_can_fail_fast_on_source_error(monkeypatch):
     def fake_urlopen(request, timeout):
         return FakeResponse({"error": {"error_code": 5, "error_msg": "User authorization failed"}})
 
     monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
 
+    source = VKSource(
+        access_token="secret",
+        sources=["club123"],
+        posts_per_source_limit=1,
+        continue_on_source_error=False,
+        rate_limit_per_second=None,
+    )
+
     with pytest.raises(VKApiError) as error:
-        VKSource(access_token="secret", sources=["club123"], posts_per_source_limit=1).fetch_posts()
+        source.fetch_posts()
 
     assert error.value.code == 5
+    assert error.value.source == VKPostSource(owner_id=-123)
+
+
+def test_vk_source_retries_temporary_vk_errors(monkeypatch):
+    calls = 0
+    delays = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return FakeResponse({"error": {"error_code": 6, "error_msg": "Too many requests per second"}})
+        return FakeResponse(
+            {
+                "response": {
+                    "items": [
+                        {
+                            "id": 1,
+                            "owner_id": -123,
+                            "date": None,
+                            "text": "Пост после retry",
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    result = VKSource(
+        access_token="secret",
+        sources=["club123"],
+        posts_per_source_limit=1,
+        rate_limit_per_second=None,
+        max_retries=1,
+        retry_backoff_seconds=1.0,
+        sleep=delays.append,
+    ).fetch_posts_with_errors()
+
+    assert calls == 2
+    assert delays == [1.0]
+    assert result.errors == []
+    assert result.posts[0].raw_text == "Пост после retry"
+
+
+def test_vk_source_rate_limits_api_requests(monkeypatch):
+    now = [0.0]
+    delays = []
+
+    def fake_sleep(delay):
+        delays.append(delay)
+        now[0] += delay
+
+    def fake_urlopen(request, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        owner_id = -1 if query.get("domain") == ["first"] else -2
+        return FakeResponse(
+            {
+                "response": {
+                    "items": [
+                        {
+                            "id": abs(owner_id),
+                            "owner_id": owner_id,
+                            "date": None,
+                            "text": "Пост",
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    VKSource(
+        access_token="secret",
+        sources=["first", "second"],
+        posts_per_source_limit=1,
+        rate_limit_per_second=20,
+        sleep=fake_sleep,
+        monotonic=lambda: now[0],
+    ).fetch_posts()
+
+    assert delays == [0.05]
 
 
 def test_vk_source_requires_token_and_sources():

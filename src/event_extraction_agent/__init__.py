@@ -26,6 +26,7 @@ from event_extraction_agent.sources import SourceAdapter
 from event_extraction_agent.vk import (
     VKApiClient,
     VKApiError,
+    VKFetchResult,
     VKPostSource,
     VKSource,
     build_vk_post_url,
@@ -55,6 +56,7 @@ __all__ = [
     "SourcePost",
     "VKApiClient",
     "VKApiError",
+    "VKFetchResult",
     "VKPostSource",
     "VKSource",
     "build_vk_post_url",

@@ -173,6 +173,20 @@ result = ExtractionPipeline(agent=agent, source=source).run()
 
 `VKSource` принимает токен строкой и не читает `.env`. Источники можно задавать как URL, `club...`, `public...`, домены или числовые `owner_id`. Адаптер получает посты через `wall.get`, сохраняет исходный текст поста в `SourcePost.text`, очищенный текст для LLM в `SourcePost.raw_text`, добавляет полезные метаданные (`source_name`, `source_url`, `published_at`, `external_id`) и приводит все к `SourcePost`.
 
+Если один VK source временно или постоянно недоступен, `VKSource` по умолчанию продолжает обрабатывать остальные источники. Ошибки доступны после вызова через `source.errors` или вместе с постами через `fetch_posts_with_errors()`:
+
+```python
+fetch_result = source.fetch_posts_with_errors()
+
+posts = fetch_result.posts
+for error in fetch_result.errors:
+    print(error.source, error.code, error)
+```
+
+Для fail-fast поведения можно передать `continue_on_source_error=False`. `VKApiError` содержит `code`, `details`, `method`, `source` и `retryable`, поэтому прод-код не теряет информацию, какой именно source упал.
+
+Для временных ошибок `VKSource` делает retry/backoff. По умолчанию `max_retries=3`, `retry_backoff_seconds=1.0`, а `rate_limit_per_second=20`, что соответствует лимиту 20 запросов в секунду для сервисного API VK. Retry применяется к HTTP `429`/`5xx`, сетевым ошибкам и временным VK-кодам вроде `6`, `9`, `10`, `29`.
+
 Вложения не передаются в агент. Если VK-пост не содержит текста после очистки, адаптер его пропускает. `raw_text` очищается от emoji, переносов строк и лишних пробелов.
 
 ## Настройка моделей и уточнений
@@ -304,6 +318,10 @@ outcome = agent.extract(post)
 - `api_version`
 - `timeout_seconds`
 - `batch_size`
+- `continue_on_source_error`
+- `rate_limit_per_second`
+- `max_retries`
+- `retry_backoff_seconds`
 
 `BatchExtractionSettings` - настройки batch-обработки:
 
@@ -349,6 +367,7 @@ outcome = agent.extract(post)
 - `SourceAdapter` как протокол источников
 - `ExtractionPipeline` и `extract_from_source` для связки источника и агента
 - production-адаптер `VKSource` для текстовых постов VK
+- partial failure handling, retry/backoff и rate limit для `VKSource`
 
 Не входит в v0.4.0:
 
