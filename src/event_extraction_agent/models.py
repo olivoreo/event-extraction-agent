@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -313,6 +314,17 @@ class BatchExtractionResult(BaseModel):
     processed: int = 0
     error_count: int = 0
     error_limit_reached: bool = False
+
+    def save_json(self, path: str | Path, *, indent: int | None = 2) -> None:
+        """Persist the batch result as UTF-8 JSON."""
+
+        Path(path).write_text(self.model_dump_json(indent=indent) + "\n", encoding="utf-8")
+
+    @classmethod
+    def load_json(cls, path: str | Path) -> "BatchExtractionResult":
+        """Load a previously persisted batch result from UTF-8 JSON."""
+
+        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
     @classmethod
     def from_outcomes(

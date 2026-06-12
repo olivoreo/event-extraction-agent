@@ -3,7 +3,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from event_extraction_agent import AttendanceType, Event, EventStatus, EventType, SourcePost
+from event_extraction_agent import (
+    AttendanceType,
+    BatchExtractionResult,
+    Event,
+    EventStatus,
+    EventType,
+    ExtractionOutcome,
+    ExtractionStatus,
+    SourcePost,
+)
 from event_extraction_agent.models import normalize_event_type
 
 
@@ -74,3 +83,29 @@ def test_enum_values_are_normalized_like_source_project():
 
     with pytest.raises(ValidationError):
         Event(**{**VALID_EVENT_DATA, "event_type": ""})
+
+
+def test_batch_extraction_result_can_be_saved_and_loaded_for_incremental_processing(tmp_path):
+    post = SourcePost(
+        text="15 июня в 19:00 пройдет лекция.",
+        raw_text="15 июня в 19:00 пройдет лекция.",
+        source_name="VK",
+        source_url="https://vk.com/example?w=wall-1_1",
+        published_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone(timedelta(hours=3))),
+        external_id="vk:-1_1",
+    )
+    outcome = ExtractionOutcome(
+        status=ExtractionStatus.EXTRACTED,
+        event=Event(**{**VALID_EVENT_DATA, "raw_text": post.raw_text}),
+        post=post,
+        raw_llm_metadata={"model": "test-model"},
+    )
+    result = BatchExtractionResult.from_outcomes([outcome])
+    path = tmp_path / "events_result.json"
+
+    result.save_json(path)
+    loaded = BatchExtractionResult.load_json(path)
+
+    assert loaded == result
+    assert loaded.outcomes[0].post.external_id == "vk:-1_1"
+    assert loaded.outcomes[0].post.raw_text_for_prompt() == "15 июня в 19:00 пройдет лекция."

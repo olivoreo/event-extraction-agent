@@ -127,6 +127,22 @@ result = pipeline.run()
 
 `SourceAdapter` отвечает только за получение подготовленных `SourcePost`. `ExtractionAgent` отвечает только за извлечение событий. `ExtractionPipeline` связывает источник и агента и возвращает `BatchExtractionResult`.
 
+Результат batch-обработки можно сохранить между запусками и передать в incremental-режим:
+
+```python
+from event_extraction_agent import BatchExtractionResult, ExtractionPipeline
+
+result = pipeline.run()
+result.save_json("events_result.json")
+
+previous = BatchExtractionResult.load_json("events_result.json")
+next_result = ExtractionPipeline(
+    agent=agent,
+    source=source,
+    existing_outcomes=previous.outcomes,
+).run()
+```
+
 Для простых сценариев можно использовать функцию:
 
 ```python
@@ -310,6 +326,8 @@ outcome = agent.extract(post)
 - `error_count`
 - `error_limit_reached`
 
+Дополнительно `BatchExtractionResult.save_json(path)` сохраняет результат в UTF-8 JSON, а `BatchExtractionResult.load_json(path)` загружает его обратно для повторного использования, например в `existing_outcomes` incremental pipeline.
+
 `Event` содержит поля события: название, описание, даты, таймзону, место, тип события, формат участия, статус, язык, метаданные источника, исходный текст, роли, индустрии, навыки, стоимость и текст целевой аудитории.
 
 ## Текущий scope
@@ -324,6 +342,7 @@ outcome = agent.extract(post)
 - последовательная batch-обработка подготовленных `SourcePost`
 - лимит ошибок, сохранение порядка, пропуск дублей и явная batch-сводка
 - incremental processing по `external_id` и нормализованному тексту для LLM
+- persistence для `BatchExtractionResult` через `save_json` и `load_json`
 - `ExtractionAgentConfig` для настройки моделей, времени prompt, timeout, rate limit и retries
 - вспомогательная модель уточнений для подозрительных полей; сейчас используется для `event_type`
 - прозрачные `raw_llm_metadata` с LLM-попытками и выбранными моделями
