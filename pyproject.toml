@@ -12,27 +12,9 @@ license = { file = "LICENSE" }
 authors = [
   { name = "event-extraction-agent contributors" }
 ]
-keywords = ["event extraction", "llm", "structured data", "vk", "pipeline"]
-classifiers = [
-  "Development Status :: 5 - Production/Stable",
-  "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Topic :: Software Development :: Libraries :: Python Modules",
-  "Typing :: Typed"
-]
 dependencies = [
   "pydantic>=2,<3"
 ]
-
-[project.urls]
-Homepage = "https://github.com/olivoreo/event-extraction-agent"
-Repository = "https://github.com/olivoreo/event-extraction-agent"
-Issues = "https://github.com/olivoreo/event-extraction-agent/issues"
-Source = "https://github.com/olivoreo/event-ai-agent"
 
 [project.optional-dependencies]
 dev = [
