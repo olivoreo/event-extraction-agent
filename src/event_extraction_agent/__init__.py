@@ -5,7 +5,6 @@ from event_extraction_agent.agent import (
     GroqChatClient,
     LLMClient,
     OllamaChatClient,
-    RequestRateLimiter,
 )
 from event_extraction_agent.models import (
     AttendanceType,
@@ -21,16 +20,13 @@ from event_extraction_agent.models import (
     ExtractionStatus,
     SourcePost,
 )
-from event_extraction_agent.pipeline import ExtractionPipeline, extract_from_source
+from event_extraction_agent.pipeline import ExtractionPipeline
 from event_extraction_agent.sources import SourceAdapter
 from event_extraction_agent.vk import (
-    VKApiClient,
     VKApiError,
     VKFetchResult,
     VKPostSource,
     VKSource,
-    build_vk_post_url,
-    parse_vk_source,
 )
 
 __all__ = [
@@ -47,18 +43,13 @@ __all__ = [
     "ExtractionOutcome",
     "ExtractionStatus",
     "ExtractionPipeline",
-    "extract_from_source",
     "GroqChatClient",
     "LLMClient",
     "OllamaChatClient",
-    "RequestRateLimiter",
     "SourceAdapter",
     "SourcePost",
-    "VKApiClient",
     "VKApiError",
     "VKFetchResult",
     "VKPostSource",
     "VKSource",
-    "build_vk_post_url",
-    "parse_vk_source",
 ]

@@ -3,7 +3,8 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from event_extraction_agent import SourcePost, VKApiError, VKPostSource, VKSource, build_vk_post_url, parse_vk_source
+from event_extraction_agent import SourcePost, VKApiError, VKPostSource, VKSource
+from event_extraction_agent.vk import build_vk_post_url, parse_vk_source
 
 
 class FakeResponse:

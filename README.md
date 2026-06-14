@@ -2,7 +2,7 @@
 
 `event_extraction_agent` - небольшая Python-библиотека для извлечения структурированных данных о мероприятиях из текстовых постов с помощью LLM.
 
-Версия `0.4.0` решает задачу extraction для одного подготовленного поста или пачки подготовленных постов: вы передаете `SourcePost` в настроенного агента и получаете `ExtractionOutcome` или `BatchExtractionResult`. Основная модель и модель уточнений задаются через явный `ExtractionAgentConfig` и переданные LLM-клиенты. Также добавлены `SourceAdapter`, `ExtractionPipeline`, incremental processing и production-адаптер `VKSource`. Хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
+Версия `0.4.0` решает задачу extraction через единый стабильный entrypoint `ExtractionPipeline`: вы передаете источник `SourcePost`, `ExtractionAgentConfig` и получаете `BatchExtractionResult`. Pipeline отвечает за batch extraction, incremental processing и сохранение результата между запусками. Также есть `SourceAdapter` для собственных источников и production-адаптер `VKSource`. Хранение в базе данных, HTTP API и расписания намеренно не входят в пакет.
 
 ## Установка
 
@@ -19,94 +19,10 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
-## Быстрый старт с Ollama
+## Быстрый старт
 
 ```python
-from event_extraction_agent import ExtractionAgent, OllamaChatClient, SourcePost
-
-client = OllamaChatClient(
-    model="qwen2.5:3b",
-    host="http://localhost:11434",
-)
-agent = ExtractionAgent(llm_client=client)
-
-post = SourcePost(
-    text="12 июня в 18:00 в городском лектории пройдет открытая лекция.",
-    raw_text="12 июня в 18:00 в городском лектории пройдет открытая лекция.",
-    source_name="Example source",
-    source_url="https://example.com/posts/123",
-    published_at="2026-06-01T10:00:00+03:00",
-    external_id="post-123",
-)
-
-outcome = agent.extract(post)
-
-if outcome.event:
-    print(outcome.event.model_dump(mode="json"))
-else:
-    print(outcome.status, outcome.errors)
-```
-
-## Batch extraction
-
-```python
-from event_extraction_agent import BatchExtractionSettings, ExtractionAgent, OllamaChatClient, SourcePost
-
-agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
-
-posts = [
-    SourcePost(text="12 июня в 18:00 пройдет лекция.", external_id="post-1"),
-    SourcePost(text="Просто информационный пост.", external_id="post-2"),
-    SourcePost(text="12 июня в 18:00 пройдет лекция.", external_id="post-1"),
-]
-
-outcomes = agent.extract_many(posts)
-result = agent.extract_batch(posts, settings=BatchExtractionSettings(max_errors=3))
-
-print([outcome.status for outcome in outcomes])
-print(result.extracted, result.skipped, result.invalid, result.llm_errors)
-```
-
-Batch-обработка последовательная и сохраняет порядок входных постов. По умолчанию агент пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
-
-## Incremental processing
-
-```python
-posts = source.fetch_posts()
-previous_result = load_previous_result_somehow()
-
-result = agent.extract_incremental(
-    posts,
-    existing_outcomes=previous_result.outcomes,
-)
-
-print(result.cached, result.processed)
-```
-
-Incremental-режим пропускает LLM extraction, если у нового поста совпали `external_id` и нормализованный текст для LLM (`raw_text`, если он задан, иначе `text`) с предыдущим `ExtractionOutcome`. Если предыдущий результат был `llm_error`, пост по умолчанию обрабатывается повторно.
-
-То же можно использовать через pipeline:
-
-```python
-pipeline = ExtractionPipeline(
-    agent=agent,
-    source=source,
-    existing_outcomes=previous_result.outcomes,
-)
-
-result = pipeline.run()
-```
-
-## Source adapters и pipeline
-
-```python
-from event_extraction_agent import (
-    ExtractionAgent,
-    ExtractionPipeline,
-    OllamaChatClient,
-    SourcePost,
-)
-
+from event_extraction_agent import ExtractionAgentConfig, ExtractionPipeline, OllamaChatClient, SourcePost
 
 class MySource:
     def fetch_posts(self) -> list[SourcePost]:
@@ -119,42 +35,68 @@ class MySource:
         ]
 
 
-agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
-pipeline = ExtractionPipeline(agent=agent, source=MySource())
+pipeline = ExtractionPipeline(
+    source=MySource(),
+    agent_config=ExtractionAgentConfig(
+        main_client=OllamaChatClient(model="qwen2.5:3b"),
+    ),
+    save_result_path="events_result.json",
+)
 
 result = pipeline.run()
+print(result.extracted, result.skipped, result.invalid, result.llm_errors)
 ```
 
-`SourceAdapter` отвечает только за получение подготовленных `SourcePost`. `ExtractionAgent` отвечает только за извлечение событий. `ExtractionPipeline` связывает источник и агента и возвращает `BatchExtractionResult`.
+`ExtractionPipeline` - основной стабильный entrypoint библиотеки. Пользователь передает источник постов, `ExtractionAgentConfig` и настройки запуска, а получает `BatchExtractionResult` со всеми `ExtractionOutcome`, счетчиками, ошибками и persistence-методами.
 
-Результат batch-обработки можно сохранить между запусками и передать в incremental-режим:
+## Incremental processing
+
+Pipeline умеет сам загрузить предыдущий результат и сохранить новый:
 
 ```python
-from event_extraction_agent import BatchExtractionResult, ExtractionPipeline
-
-result = pipeline.run()
-result.save_json("events_result.json")
-
-previous = BatchExtractionResult.load_json("events_result.json")
-next_result = ExtractionPipeline(
-    agent=agent,
+pipeline = ExtractionPipeline(
     source=source,
-    existing_outcomes=previous.outcomes,
-).run()
+    agent_config=agent_config,
+    previous_result_path="events_result.json",
+    save_result_path="events_result.json",
+)
+
+result = pipeline.run()
 ```
 
-Для простых сценариев можно использовать функцию:
+Incremental-режим пропускает LLM extraction, если у нового поста совпали `external_id` и нормализованный текст для LLM (`raw_text`, если он задан, иначе `text`) с предыдущим `ExtractionOutcome`. Если предыдущий результат был `llm_error`, пост по умолчанию обрабатывается повторно.
+
+Те же параметры можно передать на один конкретный запуск:
 
 ```python
-from event_extraction_agent import extract_from_source
-
-result = extract_from_source(source=MySource(), agent=agent)
+result = pipeline.run(
+    previous_result_path="events_result.json",
+    save_result_path="events_result.json",
+)
 ```
+
+## Source adapters
+
+`SourceAdapter` отвечает только за получение подготовленных `SourcePost`:
+
+```python
+class MySource:
+    def fetch_posts(self) -> list[SourcePost]:
+        return [
+            SourcePost(
+                text="12 июня в 18:00 пройдет лекция.",
+                source_name="My source",
+                external_id="post-1",
+            )
+        ]
+```
+
+Batch-обработка внутри pipeline последовательная и сохраняет порядок входных постов. По умолчанию pipeline пропускает дубли по `external_id`, а если `external_id` нет - по нормализованному тексту. `max_errors` в `BatchExtractionSettings` ограничивает число `invalid` и `llm_error`; после достижения лимита оставшиеся посты возвращаются как `skipped` с ошибкой `error_limit_reached`.
 
 ## VK source
 
 ```python
-from event_extraction_agent import ExtractionAgent, ExtractionPipeline, OllamaChatClient, VKSource
+from event_extraction_agent import ExtractionAgentConfig, ExtractionPipeline, OllamaChatClient, VKSource
 
 source = VKSource(
     access_token="vk-service-token",
@@ -167,8 +109,14 @@ source = VKSource(
     posts_per_source_limit=20,
 )
 
-agent = ExtractionAgent(llm_client=OllamaChatClient(model="qwen2.5:3b"))
-result = ExtractionPipeline(agent=agent, source=source).run()
+result = ExtractionPipeline(
+    source=source,
+    agent_config=ExtractionAgentConfig(
+        main_client=OllamaChatClient(model="qwen2.5:3b"),
+    ),
+    previous_result_path="events_result.json",
+    save_result_path="events_result.json",
+).run()
 ```
 
 `VKSource` принимает токен строкой и не читает `.env`. Источники можно задавать как URL, `club...`, `public...`, домены или числовые `owner_id`. Адаптер получает посты через `wall.get`, сохраняет исходный текст поста в `SourcePost.text`, очищенный текст для LLM в `SourcePost.raw_text`, добавляет полезные метаданные (`source_name`, `source_url`, `published_at`, `external_id`) и приводит все к `SourcePost`.
@@ -193,8 +141,8 @@ for error in fetch_result.errors:
 
 ```python
 from event_extraction_agent import (
-    ExtractionAgent,
     ExtractionAgentConfig,
+    ExtractionPipeline,
     OllamaChatClient,
     SourcePost,
 )
@@ -212,8 +160,13 @@ config = ExtractionAgentConfig(
     max_retries=1,
 )
 
-agent = ExtractionAgent(config=config)
-outcome = agent.extract(SourcePost(text="12 июня в 18:00 пройдет лекция."))
+class OnePostSource:
+    def fetch_posts(self) -> list[SourcePost]:
+        return [SourcePost(text="12 июня в 18:00 пройдет лекция.")]
+
+
+result = ExtractionPipeline(source=OnePostSource(), agent_config=config).run()
+outcome = result.outcomes[0]
 
 print(outcome.raw_llm_metadata)
 ```
@@ -222,7 +175,7 @@ print(outcome.raw_llm_metadata)
 
 `refinement_client` - вспомогательная модель для уточнений. Сейчас библиотека использует ее только для второго прохода по `event_type`, если основной extraction вернул отсутствующий, недопустимый или слишком общий тип события (`SocialEvent`). В будущем этот же клиент можно использовать для уточнения других подозрительных полей без изменения пользовательского API.
 
-Если пользователь передает собственные `llm_client` или `refinement_llm_client` напрямую в `ExtractionAgent`, они имеют приоритет над клиентами из `ExtractionAgentConfig`.
+Все настройки агента передаются через `ExtractionAgentConfig`. Это единственный стабильный способ настроить LLM-клиентов и поведение extraction внутри pipeline.
 
 Библиотека не ограничивает список нейросетей. Любой объект с методом `complete(system_prompt, user_prompt) -> str` может быть клиентом:
 
@@ -235,34 +188,42 @@ class MyLLMClient:
         return '{"is_event": false, "skip_reason": "not_event_announcement", "event": null}'
 
 
-agent = ExtractionAgent(
-    config=ExtractionAgentConfig(
+pipeline = ExtractionPipeline(
+    source=OnePostSource(),
+    agent_config=ExtractionAgentConfig(
         main_client=MyLLMClient(),
         current_datetime="2026-06-10T12:00:00+03:00",
-    )
+    ),
 )
 ```
 
-## Быстрый старт с Groq
+## Groq
 
 ```python
-from event_extraction_agent import ExtractionAgent, GroqChatClient, SourcePost
+from event_extraction_agent import ExtractionAgentConfig, ExtractionPipeline, GroqChatClient, SourcePost
 
 client = GroqChatClient(
     api_key="gsk_...",
     model="meta-llama/llama-4-scout-17b-16e-instruct",
 )
-agent = ExtractionAgent(llm_client=client)
 
-post = SourcePost(
-    text="20 июля в 15:30 пройдет открытый мастер-класс для начинающих дизайнеров.",
-    source_name="Example source",
-    source_url="https://example.com/posts/456",
-    published_at="2026-07-10T12:00:00+03:00",
-    external_id="post-456",
-)
+class OnePostSource:
+    def fetch_posts(self) -> list[SourcePost]:
+        return [
+            SourcePost(
+                text="20 июля в 15:30 пройдет открытый мастер-класс для начинающих дизайнеров.",
+                source_name="Example source",
+                source_url="https://example.com/posts/456",
+                published_at="2026-07-10T12:00:00+03:00",
+                external_id="post-456",
+            )
+        ]
 
-outcome = agent.extract(post)
+
+result = ExtractionPipeline(
+    source=OnePostSource(),
+    agent_config=ExtractionAgentConfig(main_client=client),
+).run()
 ```
 
 ## Публичные модели
@@ -305,8 +266,9 @@ outcome = agent.extract(post)
 `ExtractionPipeline` - orchestration-слой:
 
 - получает посты из `SourceAdapter`
-- передает их в `ExtractionAgent.extract_batch`
-- возвращает `BatchExtractionResult`
+- запускает batch или incremental extraction
+- при необходимости загружает предыдущий `BatchExtractionResult`
+- при необходимости сохраняет новый `BatchExtractionResult`
 
 `VKSource` - готовый source adapter для VK:
 
@@ -365,7 +327,7 @@ outcome = agent.extract(post)
 - вспомогательная модель уточнений для подозрительных полей; сейчас используется для `event_type`
 - прозрачные `raw_llm_metadata` с LLM-попытками и выбранными моделями
 - `SourceAdapter` как протокол источников
-- `ExtractionPipeline` и `extract_from_source` для связки источника и агента
+- `ExtractionPipeline` как единый стабильный entrypoint запуска
 - production-адаптер `VKSource` для текстовых постов VK
 - partial failure handling, retry/backoff и rate limit для `VKSource`
 
@@ -378,7 +340,6 @@ outcome = agent.extract(post)
 - хранение в базе данных
 - FastAPI/backend routes
 - scheduled jobs
-- batch JSON import/export
 - custom source-specific ingestion за пределами готового `VKSource`
 - локальные ML-классификаторы
 

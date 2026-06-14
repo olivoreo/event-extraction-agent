@@ -1,51 +1,98 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from event_extraction_agent.agent import ExtractionAgent
-from event_extraction_agent.models import BatchExtractionResult, BatchExtractionSettings, ExtractionOutcome, SourcePost
+from event_extraction_agent.models import (
+    BatchExtractionResult,
+    BatchExtractionSettings,
+    ExtractionAgentConfig,
+    ExtractionOutcome,
+    SourcePost,
+)
 from event_extraction_agent.sources import SourceAdapter
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ExtractionPipeline:
-    """Orchestrate source fetching and batch extraction."""
+    """Stable entrypoint for fetching posts and extracting events."""
 
-    agent: ExtractionAgent
     source: SourceAdapter
+    agent: ExtractionAgent
     batch_settings: BatchExtractionSettings | None = None
     existing_outcomes: list[ExtractionOutcome] | None = None
+    previous_result_path: str | Path | None = None
+    save_result_path: str | Path | None = None
     retry_cached_llm_errors: bool = True
 
-    def run(self) -> BatchExtractionResult:
+    def __init__(
+        self,
+        source: SourceAdapter,
+        *,
+        agent_config: ExtractionAgentConfig,
+        batch_settings: BatchExtractionSettings | None = None,
+        existing_outcomes: list[ExtractionOutcome] | None = None,
+        previous_result_path: str | Path | None = None,
+        save_result_path: str | Path | None = None,
+        retry_cached_llm_errors: bool = True,
+    ) -> None:
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "agent", ExtractionAgent(config=agent_config))
+        object.__setattr__(self, "batch_settings", batch_settings)
+        object.__setattr__(self, "existing_outcomes", existing_outcomes)
+        object.__setattr__(self, "previous_result_path", previous_result_path)
+        object.__setattr__(self, "save_result_path", save_result_path)
+        object.__setattr__(self, "retry_cached_llm_errors", retry_cached_llm_errors)
+
+    def run(
+        self,
+        *,
+        existing_outcomes: list[ExtractionOutcome] | None = None,
+        previous_result_path: str | Path | None = None,
+        save_result_path: str | Path | None = None,
+    ) -> BatchExtractionResult:
         posts = self.source.fetch_posts()
         _validate_posts(posts)
-        if self.existing_outcomes is not None:
-            return self.agent.extract_incremental(
+
+        resolved_existing_outcomes = _resolve_existing_outcomes(
+            explicit_outcomes=existing_outcomes,
+            configured_outcomes=self.existing_outcomes,
+            explicit_path=previous_result_path,
+            configured_path=self.previous_result_path,
+        )
+        if resolved_existing_outcomes is not None:
+            result = self.agent.extract_incremental(
                 posts,
-                existing_outcomes=self.existing_outcomes,
+                existing_outcomes=resolved_existing_outcomes,
                 settings=self.batch_settings,
                 retry_llm_errors=self.retry_cached_llm_errors,
             )
-        return self.agent.extract_batch(posts, settings=self.batch_settings)
+        else:
+            result = self.agent.extract_batch(posts, settings=self.batch_settings)
+
+        result_path = save_result_path if save_result_path is not None else self.save_result_path
+        if result_path is not None:
+            result.save_json(result_path)
+        return result
 
 
-def extract_from_source(
-    source: SourceAdapter,
-    agent: ExtractionAgent,
-    batch_settings: BatchExtractionSettings | None = None,
-    existing_outcomes: list[ExtractionOutcome] | None = None,
-    retry_cached_llm_errors: bool = True,
-) -> BatchExtractionResult:
-    """Fetch prepared posts from a source and extract events from them."""
+def _resolve_existing_outcomes(
+    *,
+    explicit_outcomes: list[ExtractionOutcome] | None,
+    configured_outcomes: list[ExtractionOutcome] | None,
+    explicit_path: str | Path | None,
+    configured_path: str | Path | None,
+) -> list[ExtractionOutcome] | None:
+    if explicit_outcomes is not None:
+        return explicit_outcomes
+    if configured_outcomes is not None:
+        return configured_outcomes
 
-    return ExtractionPipeline(
-        agent=agent,
-        source=source,
-        batch_settings=batch_settings,
-        existing_outcomes=existing_outcomes,
-        retry_cached_llm_errors=retry_cached_llm_errors,
-    ).run()
+    path = explicit_path if explicit_path is not None else configured_path
+    if path is None:
+        return None
+    return BatchExtractionResult.load_json(path).outcomes
 
 
 def _validate_posts(posts: object) -> None:

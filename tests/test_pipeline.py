@@ -4,11 +4,13 @@ import pytest
 
 from event_extraction_agent import (
     BatchExtractionSettings,
-    ExtractionAgent,
+    BatchExtractionResult,
+    Event,
+    ExtractionAgentConfig,
+    ExtractionOutcome,
     ExtractionPipeline,
     ExtractionStatus,
     SourcePost,
-    extract_from_source,
 )
 
 
@@ -41,26 +43,24 @@ def test_pipeline_fetches_posts_and_runs_batch_extraction():
         SourcePost(text="Просто информационный пост.", external_id="post-2"),
     ]
     source = FakeSource(posts)
-    agent = ExtractionAgent(
-        llm_client=FakeLLMClient(
-            [
-                json.dumps(
-                    {
-                        "is_event": True,
-                        "skip_reason": None,
-                        "event": _event_payload(),
-                    },
-                    ensure_ascii=False,
-                ),
-                json.dumps(
-                    {"is_event": False, "skip_reason": "not_event_announcement", "event": None},
-                    ensure_ascii=False,
-                ),
-            ]
-        )
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": _event_payload(),
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {"is_event": False, "skip_reason": "not_event_announcement", "event": None},
+                ensure_ascii=False,
+            ),
+        ]
     )
 
-    result = ExtractionPipeline(agent=agent, source=source).run()
+    result = ExtractionPipeline(source=source, agent_config=ExtractionAgentConfig(main_client=client)).run()
 
     assert source.calls == 1
     assert result.total == 2
@@ -71,11 +71,11 @@ def test_pipeline_fetches_posts_and_runs_batch_extraction():
     ]
 
 
-def test_extract_from_source_uses_batch_settings():
+def test_pipeline_uses_batch_settings():
     post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
     source = FakeSource([post, post])
-    agent = ExtractionAgent(
-        llm_client=FakeLLMClient(
+    config = ExtractionAgentConfig(
+        main_client=FakeLLMClient(
             [
                 json.dumps(
                     {
@@ -86,14 +86,14 @@ def test_extract_from_source_uses_batch_settings():
                     ensure_ascii=False,
                 )
             ]
-        )
+        ),
     )
 
-    result = extract_from_source(
+    result = ExtractionPipeline(
         source=source,
-        agent=agent,
+        agent_config=config,
         batch_settings=BatchExtractionSettings(skip_duplicates=True),
-    )
+    ).run()
 
     assert result.total == 2
     assert result.extracted == 1
@@ -103,25 +103,11 @@ def test_extract_from_source_uses_batch_settings():
 
 def test_pipeline_can_run_incrementally_with_existing_outcomes():
     post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
-    existing_agent = ExtractionAgent(
-        llm_client=FakeLLMClient(
-            [
-                json.dumps(
-                    {
-                        "is_event": True,
-                        "skip_reason": None,
-                        "event": _event_payload(),
-                    },
-                    ensure_ascii=False,
-                )
-            ]
-        )
-    )
-    existing_outcome = existing_agent.extract(post)
+    existing_outcome = _existing_outcome(post)
     source = FakeSource([SourcePost(text="5 июня\nв 18:00 пройдет лекция.", external_id="post-1")])
-    agent = ExtractionAgent(llm_client=FakeLLMClient([]))
+    config = ExtractionAgentConfig(main_client=FakeLLMClient([]))
 
-    result = ExtractionPipeline(agent=agent, source=source, existing_outcomes=[existing_outcome]).run()
+    result = ExtractionPipeline(agent_config=config, source=source, existing_outcomes=[existing_outcome]).run()
 
     assert result.total == 1
     assert result.cached == 1
@@ -130,12 +116,33 @@ def test_pipeline_can_run_incrementally_with_existing_outcomes():
     assert result.outcomes[0].raw_llm_metadata["incremental_cached"] is True
 
 
+def test_pipeline_can_load_previous_result_and_save_next_result(tmp_path):
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
+    previous_result = BatchExtractionResult.from_outcomes([_existing_outcome(post)])
+    previous_path = tmp_path / "previous.json"
+    next_path = tmp_path / "next.json"
+    previous_result.save_json(previous_path)
+
+    result = ExtractionPipeline(
+        source=FakeSource([SourcePost(text="5 июня\nв 18:00 пройдет лекция.", external_id="post-1")]),
+        agent_config=ExtractionAgentConfig(main_client=FakeLLMClient([])),
+        previous_result_path=previous_path,
+        save_result_path=next_path,
+    ).run()
+
+    loaded = BatchExtractionResult.load_json(next_path)
+
+    assert result.cached == 1
+    assert loaded.cached == 1
+    assert loaded.outcomes[0].post.external_id == "post-1"
+
+
 def test_pipeline_rejects_invalid_source_return_shape():
     source = FakeSource(["not a SourcePost"])
-    agent = ExtractionAgent(llm_client=FakeLLMClient([]))
+    config = ExtractionAgentConfig(main_client=FakeLLMClient([]))
 
     with pytest.raises(TypeError, match=r"list\[SourcePost\]"):
-        ExtractionPipeline(agent=agent, source=source).run()
+        ExtractionPipeline(agent_config=config, source=source).run()
 
 
 def _event_payload() -> dict[str, object]:
@@ -161,3 +168,12 @@ def _event_payload() -> dict[str, object]:
         "price_text": "free",
         "target_audience_text": None,
     }
+
+
+def _existing_outcome(post: SourcePost) -> ExtractionOutcome:
+    return ExtractionOutcome(
+        status=ExtractionStatus.EXTRACTED,
+        event=Event(**{**_event_payload(), "raw_text": post.raw_text_for_prompt()}),
+        post=post,
+        raw_llm_metadata={"model": "cached-test-model"},
+    )
