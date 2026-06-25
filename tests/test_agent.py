@@ -55,7 +55,7 @@ def test_extract_returns_outcome_with_event():
 
     assert outcome.status == ExtractionStatus.EXTRACTED
     assert outcome.event is not None
-    assert outcome.event.start_at.isoformat() == "2026-06-05T18:00:00+03:00"
+    assert outcome.event.start_at.isoformat() == "2026-06-05T18:00:00"
     assert outcome.event.source_name == "Центр"
     assert outcome.event.source_url == "https://vk.com/wall-1_1"
     assert outcome.event.raw_text == RAW_TEXT
@@ -182,7 +182,165 @@ def test_extract_repairs_start_at_from_russian_date_and_time():
 
     assert outcome.status == ExtractionStatus.EXTRACTED
     assert outcome.event is not None
-    assert outcome.event.start_at.isoformat() == "2026-06-01T18:30:00+03:00"
+    assert outcome.event.start_at.isoformat() == "2026-06-01T18:30:00"
+
+
+def test_extract_repairs_start_at_from_russian_date_without_time_as_midnight():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at=None),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Дистанционный конкурс пройдет 3 августа. Участники отправляют ролики онлайн.",
+            published_at="2026-06-24T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-08-03T00:00:00"
+
+
+def test_extract_keeps_llm_start_at_even_when_text_has_different_milestone_date():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-06-18T00:00:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Результаты дистанционного конкурса будут объявлены 3 августа.",
+            published_at="2026-06-24T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-06-18T00:00:00"
+
+
+def test_extract_uses_unknown_timezone_without_local_context():
+    payload = _event_payload(start_at=None)
+    payload["timezone"] = None
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": payload,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Результаты дистанционного конкурса будут объявлены 3 августа.",
+            published_at="2026-06-24T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.timezone == "unknown"
+
+
+def test_extract_keeps_first_date_in_date_range_with_shared_time():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at=None),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="19 и 20 июня в 17:00 пройдет фестиваль народных промыслов.",
+            published_at="2026-06-10T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-06-19T17:00:00"
+
+
+def test_extract_strips_timezone_offset_from_llm_datetimes():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-06-19T17:00:00+04:00"),
+                    "end_at": "2026-06-19T21:00:00Z",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text="19 июня в 17:00 пройдет фестиваль."))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-06-19T17:00:00"
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-06-19T21:00:00"
+
+
+def test_extract_overrides_giveaway_result_as_non_announcement():
+    client = FakeLLMClient(_event_response("2026-06-26T19:00:00+03:00"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="ИТОГИ РОЗЫГРЫША. Поздравляем победителя! 26 июня Амфитеатр.")
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "not_event_announcement"
+
+
+def test_extract_overrides_past_report_as_non_announcement():
+    client = FakeLLMClient(_event_response("2026-06-22T18:00:00+03:00"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="22 июня мы смотрели фильм в амфитеатре. Спасибо каждому, кто разделил этот вечер.")
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "past_event_report"
+
+
+def test_extract_overrides_sostoyalsya_report_as_non_announcement():
+    client = FakeLLMClient(_event_response("2026-06-12T00:00:00+03:00"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="Сегодня состоялся праздничный концерт. Под открытым небом собрались тысячи людей.")
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "past_event_report"
 
 
 def test_event_type_refinement_uses_refinement_client():
@@ -438,7 +596,7 @@ def test_extract_incremental_reuses_unchanged_outcomes_and_processes_changed_pos
     assert result.outcomes[0].raw_llm_metadata["incremental_cached"] is True
     assert result.outcomes[0].post == posts[0]
     assert result.outcomes[1].event is not None
-    assert result.outcomes[1].event.start_at.isoformat() == "2026-06-07T18:00:00+03:00"
+    assert result.outcomes[1].event.start_at.isoformat() == "2026-06-07T18:00:00"
 
 
 def test_extract_incremental_retries_cached_llm_errors_by_default():

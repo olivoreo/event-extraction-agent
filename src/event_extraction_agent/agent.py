@@ -74,8 +74,30 @@ _DATE_TIME_PATTERN = re.compile(
     r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b",
     re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
+_DATE_RANGE_TIME_PATTERN = re.compile(
+    rf"\b(?P<day>\d{{1,2}})\s*(?:и|[-–—])\s*\d{{1,2}}\s*(?P<month>{_MONTH_PATTERN})\b"
+    r"(?:(?:(?!\b\d{1,2}\s*(?:"
+    + _MONTH_PATTERN
+    + r")\b).){0,80}?)"
+    r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b",
+    re.IGNORECASE | re.UNICODE | re.DOTALL,
+)
+_DATE_PATTERN = re.compile(
+    rf"\b(?P<day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
+    re.IGNORECASE | re.UNICODE,
+)
 _LOCAL_CONTEXT_WORDS = re.compile(
     r"\b(волгоград|москва|санкт-петербург|амфитеатр|ресторан|храм|набережная)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_DATETIME_OFFSET_SUFFIX = re.compile(r"([T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:Z|[+-]\d{2}:?\d{2})$")
+_GIVEAWAY_RESULT_WORDS = re.compile(
+    r"\b(итоги\s+(?:розыгрыша|конкурса)|поздравляем\s+победител|победител[ья]\b)",
+    re.IGNORECASE | re.UNICODE,
+)
+_PAST_REPORT_WORDS = re.compile(
+    r"\b(состоял(?:ся|ась|ось|ись)|прош[её]л|прошла|прошло|отметили|смотрели|собрал[аои]?|"
+    r"стал[ао]?\s+(?:для\s+\S+\s+)?(?:праздником|опытом|традицией)|спасибо\s+(?:каждому|всем))\b",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -298,8 +320,17 @@ class ExtractionAgent:
                 post=post,
                 errors=[_error("llm", "llm_error", str(exc))],
                 metadata=self.last_metadata,
-            )
+        )
         self._add_llm_attempt(stage=stage, client=client, success=True)
+
+        skip_reason = _obvious_non_announcement_reason(raw_text)
+        if skip_reason is not None:
+            return _outcome(
+                status=ExtractionStatus.SKIPPED,
+                post=post,
+                errors=[_error("root", skip_reason, "post is not an event announcement")],
+                metadata=self.last_metadata,
+            )
 
         if response_payload.get("is_event") is False:
             reason = response_payload.get("skip_reason")
@@ -561,8 +592,9 @@ def _repair_event_payload(payload: dict[str, Any], raw_text: str, published_at: 
         copied["title"] = _infer_title(raw_text)
     if not isinstance(copied.get("language"), str) or not copied.get("language", "").strip():
         copied["language"] = "ru"
-    if _is_missing_value(copied.get("timezone")) and _LOCAL_CONTEXT_WORDS.search(raw_text):
-        copied["timezone"] = "Europe/Moscow"
+    if _is_missing_value(copied.get("timezone")):
+        copied["timezone"] = "Europe/Moscow" if _LOCAL_CONTEXT_WORDS.search(raw_text) else "unknown"
+    _strip_datetime_offsets(copied)
     if _is_missing_value(copied.get("start_at")):
         inferred_start_at = _extract_start_at(raw_text, published_at)
         if inferred_start_at is not None:
@@ -580,18 +612,68 @@ def _repair_event_payload(payload: dict[str, Any], raw_text: str, published_at: 
     return copied
 
 
+def _obvious_non_announcement_reason(raw_text: str) -> str | None:
+    if _GIVEAWAY_RESULT_WORDS.search(raw_text):
+        return "not_event_announcement"
+    if _PAST_REPORT_WORDS.search(raw_text):
+        return "past_event_report"
+    return None
+
+
+def _strip_datetime_offsets(payload: dict[str, Any]) -> None:
+    for field in ("start_at", "end_at"):
+        value = payload.get(field)
+        if isinstance(value, str):
+            payload[field] = _DATETIME_OFFSET_SUFFIX.sub(r"\1", value)
+
+
 def _extract_start_at(raw_text: str, published_at: str | None) -> str | None:
+    match = _DATE_RANGE_TIME_PATTERN.search(raw_text)
+    if match is not None:
+        return _build_start_at(
+            day=int(match.group("day")),
+            month=_MONTHS[match.group("month").lower()],
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            published_at=published_at,
+        )
+
     match = _DATE_TIME_PATTERN.search(raw_text)
+    if match is not None:
+        return _build_start_at(
+            day=int(match.group("day")),
+            month=_MONTHS[match.group("month").lower()],
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            published_at=published_at,
+        )
+
+    match = _DATE_PATTERN.search(raw_text)
     if match is None:
         return None
 
-    day = int(match.group("day"))
-    month = _MONTHS[match.group("month").lower()]
-    hour = int(match.group("hour"))
-    minute = int(match.group("minute"))
+    return _build_start_at(
+        day=int(match.group("day")),
+        month=_MONTHS[match.group("month").lower()],
+        hour=0,
+        minute=0,
+        published_at=published_at,
+    )
+
+
+def _build_start_at(day: int, month: int, hour: int, minute: int, published_at: str | None) -> str | None:
     if not (1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
         return None
 
+    event_date = _resolve_event_date(day, month, published_at)
+    if event_date is None:
+        return None
+
+    event_datetime = datetime.combine(event_date, time(hour, minute))
+    return event_datetime.isoformat()
+
+
+def _resolve_event_date(day: int, month: int, published_at: str | None) -> date | None:
     published_date = _published_date(published_at)
     year = published_date.year if published_date is not None else datetime.now(timezone.utc).year
     try:
@@ -604,8 +686,7 @@ def _extract_start_at(raw_text: str, published_at: str | None) -> str | None:
         except ValueError:
             return None
 
-    event_datetime = datetime.combine(event_date, time(hour, minute), tzinfo=timezone(timedelta(hours=3)))
-    return event_datetime.isoformat()
+    return event_date
 
 
 def _published_date(published_at: str | None) -> date | None:
