@@ -529,6 +529,70 @@ def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
     assert len(client.calls) == 3
 
 
+def test_extract_batch_skips_semantic_event_duplicates_and_keeps_latest_post():
+    client = FakeLLMClient(
+        [
+            _event_response(
+                "2026-06-19T17:00:00",
+                title='Фестиваль народных промыслов "ВЕРЕТЕНО"',
+                venue_name="Амфитеатр",
+                city="Волгоград",
+            ),
+            _event_response(
+                "2026-06-19T17:00:00",
+                title='Фестиваль народных промыслов "ВЕРЕТЕНО"',
+                venue_name="Амфитеатр",
+                city="Волгоград",
+            ),
+            _event_response(
+                "2026-06-20T17:00:00",
+                title="Фестиваль «Веретено»",
+                venue_name="Амфитеатр",
+                city="Волгоград",
+            ),
+        ]
+    )
+    posts = [
+        SourcePost(text="19 и 20 июня фестиваль Веретено.", published_at="2026-06-10T12:00:00+00:00"),
+        SourcePost(text="19 и 20 июня фестиваль народных промыслов Веретено.", published_at="2026-06-16T12:00:00+00:00"),
+        SourcePost(text="20 июня фестиваль Веретено переносится.", published_at="2026-06-19T12:00:00+00:00"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    assert result.extracted == 1
+    assert result.skipped == 2
+    assert [outcome.status for outcome in result.outcomes] == [
+        ExtractionStatus.SKIPPED,
+        ExtractionStatus.SKIPPED,
+        ExtractionStatus.EXTRACTED,
+    ]
+    assert result.outcomes[0].errors[0].code == "duplicate_event"
+    assert result.outcomes[1].errors[0].code == "duplicate_event"
+    assert result.outcomes[0].raw_llm_metadata is not None
+    assert result.outcomes[0].raw_llm_metadata["duplicate_of"] == 2
+
+
+def test_extract_batch_can_keep_semantic_event_duplicates():
+    client = FakeLLMClient(
+        [
+            _event_response("2026-06-19T17:00:00", title='Фестиваль народных промыслов "ВЕРЕТЕНО"'),
+            _event_response("2026-06-20T17:00:00", title="Фестиваль «Веретено»"),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="19 июня фестиваль Веретено.", published_at="2026-06-10T12:00:00+00:00"),
+            SourcePost(text="20 июня фестиваль Веретено.", published_at="2026-06-19T12:00:00+00:00"),
+        ],
+        settings=BatchExtractionSettings(skip_event_duplicates=False),
+    )
+
+    assert result.extracted == 2
+    assert result.skipped == 0
+
+
 def test_extract_batch_returns_summary_and_applies_error_limit():
     client = FakeLLMClient(
         json.dumps(
@@ -629,15 +693,21 @@ def test_extract_incremental_can_keep_cached_llm_errors():
     assert result.outcomes[0].status == ExtractionStatus.LLM_ERROR
 
 
-def _event_payload(start_at: str | None) -> dict[str, object]:
+def _event_payload(
+    start_at: str | None,
+    *,
+    title: str = "Мисс и Мистер Студенчество",
+    venue_name: str | None = "Амфитеатр",
+    city: str | None = "Волгоград",
+) -> dict[str, object]:
     return {
-        "title": "Мисс и Мистер Студенчество",
+        "title": title,
         "description": "Конкурс для студентов",
         "start_at": start_at,
         "end_at": None,
         "timezone": "Europe/Moscow",
-        "city": "Волгоград",
-        "venue_name": "Амфитеатр",
+        "city": city,
+        "venue_name": venue_name,
         "address": None,
         "event_type": "CompetitionEvent",
         "attendance_type": "OfflineEventAttendanceMode",
@@ -655,12 +725,18 @@ def _event_payload(start_at: str | None) -> dict[str, object]:
     }
 
 
-def _event_response(start_at: str) -> str:
+def _event_response(
+    start_at: str,
+    *,
+    title: str = "Мисс и Мистер Студенчество",
+    venue_name: str | None = "Амфитеатр",
+    city: str | None = "Волгоград",
+) -> str:
     return json.dumps(
         {
             "is_event": True,
             "skip_reason": None,
-            "event": _event_payload(start_at=start_at),
+            "event": _event_payload(start_at=start_at, title=title, venue_name=venue_name, city=city),
         },
         ensure_ascii=False,
     )

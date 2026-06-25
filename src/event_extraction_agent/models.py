@@ -291,6 +291,7 @@ class BatchExtractionSettings(BaseModel):
     max_errors: int | None = None
     skip_empty: bool = True
     skip_duplicates: bool = True
+    skip_event_duplicates: bool = True
 
     @field_validator("max_errors")
     @classmethod

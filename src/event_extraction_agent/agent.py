@@ -100,6 +100,25 @@ _PAST_REPORT_WORDS = re.compile(
     r"стал[ао]?\s+(?:для\s+\S+\s+)?(?:праздником|опытом|традицией)|спасибо\s+(?:каждому|всем))\b",
     re.IGNORECASE | re.UNICODE,
 )
+_DUPLICATE_TITLE_STOPWORDS = {
+    "в",
+    "на",
+    "и",
+    "для",
+    "по",
+    "с",
+    "со",
+    "о",
+    "об",
+    "мероприятие",
+    "событие",
+    "фестиваль",
+    "концерт",
+    "спектакль",
+    "конкурс",
+    "кинопоказ",
+    "вечер",
+}
 
 
 class LLMClient(Protocol):
@@ -473,7 +492,7 @@ class ExtractionAgent:
                 error_count += 1
 
         return BatchExtractionResult.from_outcomes(
-            outcomes,
+            _deduplicate_event_outcomes(outcomes, batch_settings),
             settings=batch_settings,
             error_limit_reached=error_limit_reached,
         )
@@ -514,7 +533,7 @@ class ExtractionAgent:
                 outcomes[source_index] = outcome.model_copy(update={"raw_llm_metadata": metadata})
 
         return BatchExtractionResult.from_outcomes(
-            [outcome for outcome in outcomes if outcome is not None],
+            _deduplicate_event_outcomes([outcome for outcome in outcomes if outcome is not None], settings),
             settings=settings,
         )
 
@@ -687,6 +706,120 @@ def _resolve_event_date(day: int, month: int, published_at: str | None) -> date 
             return None
 
     return event_date
+
+
+def _deduplicate_event_outcomes(
+    outcomes: list[ExtractionOutcome],
+    settings: BatchExtractionSettings | None,
+) -> list[ExtractionOutcome]:
+    if settings is not None and not settings.skip_event_duplicates:
+        return outcomes
+
+    extracted_indices = [
+        index
+        for index, outcome in enumerate(outcomes)
+        if outcome.status == ExtractionStatus.EXTRACTED and outcome.event is not None
+    ]
+    groups: list[list[int]] = []
+
+    # ponytail: O(n²) is fine for batch post-processing; index later if batch sizes hurt.
+    for index in extracted_indices:
+        group = next(
+            (
+                candidate
+                for candidate in groups
+                if any(_events_are_duplicates(outcomes[index], outcomes[other]) for other in candidate)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([index])
+        else:
+            group.append(index)
+
+    deduplicated = list(outcomes)
+    for group in groups:
+        if len(group) < 2:
+            continue
+        keep_index = max(group, key=lambda index: (_published_at_sort_key(outcomes[index].post), index))
+        for index in group:
+            if index != keep_index:
+                deduplicated[index] = _duplicate_event_outcome(outcomes[index], keep_index)
+    return deduplicated
+
+
+def _events_are_duplicates(left: ExtractionOutcome, right: ExtractionOutcome) -> bool:
+    if left.event is None or right.event is None:
+        return False
+    if _title_containment(left.event.title, right.event.title) < 0.65:
+        return False
+    if not _event_dates_are_close(left.event.start_at, right.event.start_at):
+        return False
+    return _locations_are_compatible(left.event.city, right.event.city) and _locations_are_compatible(
+        left.event.venue_name,
+        right.event.venue_name,
+    )
+
+
+def _duplicate_event_outcome(outcome: ExtractionOutcome, keep_index: int) -> ExtractionOutcome:
+    metadata = dict(outcome.raw_llm_metadata or {})
+    metadata["duplicate_of"] = keep_index
+    return outcome.model_copy(
+        update={
+            "status": ExtractionStatus.SKIPPED,
+            "event": None,
+            "errors": [_error("event", "duplicate_event", "event duplicates a later extracted event")],
+            "raw_llm_metadata": metadata,
+        }
+    )
+
+
+def _title_containment(left: str, right: str) -> float:
+    left_tokens = _title_tokens(left)
+    right_tokens = _title_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+
+def _title_tokens(value: str) -> set[str]:
+    tokens = set(re.findall(r"[a-zа-яё0-9]+", value.lower().replace("ё", "е"), re.IGNORECASE))
+    significant = tokens - _DUPLICATE_TITLE_STOPWORDS
+    return significant or tokens
+
+
+def _event_dates_are_close(left: datetime, right: datetime) -> bool:
+    return abs((left.date() - right.date()).days) <= 3
+
+
+def _locations_are_compatible(left: str | None, right: str | None) -> bool:
+    left_tokens = _location_tokens(left)
+    right_tokens = _location_tokens(right)
+    if not left_tokens or not right_tokens:
+        return True
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens)) >= 0.5
+
+
+def _location_tokens(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return set(re.findall(r"[a-zа-яё0-9]+", value.lower().replace("ё", "е"), re.IGNORECASE))
+
+
+def _published_at_sort_key(post: SourcePost) -> float:
+    value = post.published_at
+    if value is None:
+        return float("-inf")
+    if isinstance(value, datetime):
+        published_at = value
+    else:
+        try:
+            published_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return float("-inf")
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=timezone.utc)
+    return published_at.timestamp()
 
 
 def _published_date(published_at: str | None) -> date | None:
