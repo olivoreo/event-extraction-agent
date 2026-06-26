@@ -343,6 +343,20 @@ def test_extract_overrides_sostoyalsya_report_as_non_announcement():
     assert outcome.errors[0].code == "past_event_report"
 
 
+def test_extract_overrides_admission_ad_without_date_as_non_announcement():
+    client = FakeLLMClient(_event_response("2026-06-01T00:00:00"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Университет приглашает выпускников подать документы на программу высшего образования уже этим летом."
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "not_event_announcement"
+
+
 def test_event_type_refinement_uses_refinement_client():
     main_client = FakeLLMClient(
         json.dumps(

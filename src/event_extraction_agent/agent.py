@@ -100,6 +100,11 @@ _PAST_REPORT_WORDS = re.compile(
     r"стал[ао]?\s+(?:для\s+\S+\s+)?(?:праздником|опытом|традицией)|спасибо\s+(?:каждому|всем))\b",
     re.IGNORECASE | re.UNICODE,
 )
+_ADMISSION_AD_WORDS = re.compile(
+    r"\b(подать\s+документы|поступлени[ея]|прием\s+документов|приём\s+документов|"
+    r"программа\s+(?:высшего\s+)?образования|колледж|университет)\b",
+    re.IGNORECASE | re.UNICODE,
+)
 _DUPLICATE_TITLE_STOPWORDS = {
     "в",
     "на",
@@ -636,6 +641,8 @@ def _obvious_non_announcement_reason(raw_text: str) -> str | None:
         return "not_event_announcement"
     if _PAST_REPORT_WORDS.search(raw_text):
         return "past_event_report"
+    if _ADMISSION_AD_WORDS.search(raw_text) and _extract_start_at(raw_text, None) is None:
+        return "not_event_announcement"
     return None
 
 
