@@ -233,6 +233,59 @@ def test_extract_keeps_llm_start_at_even_when_text_has_different_milestone_date(
     assert outcome.event.start_at.isoformat() == "2026-06-18T00:00:00"
 
 
+def test_extract_repairs_deadline_used_as_application_start_at():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2025-06-23T00:00:00"),
+                    "end_at": None,
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Успейте подать заявку на Международную Премию #МЫВМЕСТЕ до 23 июня.",
+            published_at="2025-06-03T13:10:07+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2025-06-03T00:00:00"
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2025-06-23T00:00:00"
+
+
+def test_extract_drops_end_at_inferred_from_duration():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-02-07T10:00:00"),
+                    "end_at": "2026-02-07T11:30:00",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="7 февраля в 10:00 пройдет IT заряд. Продолжительность: 1,5 часа.")
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is None
+
+
 def test_extract_uses_unknown_timezone_without_local_context():
     payload = _event_payload(start_at=None)
     payload["timezone"] = None
@@ -281,6 +334,71 @@ def test_extract_keeps_first_date_in_date_range_with_shared_time():
     assert outcome.status == ExtractionStatus.EXTRACTED
     assert outcome.event is not None
     assert outcome.event.start_at.isoformat() == "2026-06-19T17:00:00"
+
+
+def test_extract_splits_non_contiguous_repeated_dates_into_events():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-05-09T18:00:00"),
+                    "end_at": "2026-05-11T18:00:00",
+                    "title": "Спектакль «Василий Тёркин»",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="9 и 11 мая в 18:00 на сцене амфитеатра пройдет спектакль «Василий Тёркин».",
+            published_at="2026-04-30T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.events is not None
+    assert [event.start_at.isoformat() for event in outcome.events] == [
+        "2026-05-09T18:00:00",
+        "2026-05-11T18:00:00",
+    ]
+    assert [event.end_at for event in outcome.events] == [None, None]
+
+
+def test_extract_keeps_consecutive_listed_dates_as_single_event():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-01-03T14:00:00"),
+                    "end_at": "2026-01-05T17:00:00",
+                    "title": "Новогодние молодёжные гуляния",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="3, 4, 5 января приглашаем на Новогодние гуляния. Время: 14:00 - 17:00.",
+            published_at="2025-12-30T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.events is not None
+    assert len(outcome.events) == 1
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-01-03T14:00:00"
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-01-05T17:00:00"
 
 
 def test_extract_strips_timezone_offset_from_llm_datetimes():
@@ -336,6 +454,18 @@ def test_extract_overrides_sostoyalsya_report_as_non_announcement():
 
     outcome = ExtractionAgent(llm_client=client).extract(
         SourcePost(text="Сегодня состоялся праздничный концерт. Под открытым небом собрались тысячи людей.")
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "past_event_report"
+
+
+def test_extract_overrides_visitor_count_report_as_non_announcement():
+    client = FakeLLMClient(_event_response("2025-03-24T00:00:00"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="Форум «Образование — 2025» прошел на Волгоград Арене. Посетителями стали школьники.")
     )
 
     assert outcome.status == ExtractionStatus.SKIPPED
@@ -585,6 +715,44 @@ def test_extract_batch_skips_semantic_event_duplicates_and_keeps_latest_post():
     assert result.outcomes[1].errors[0].code == "duplicate_event"
     assert result.outcomes[0].raw_llm_metadata is not None
     assert result.outcomes[0].raw_llm_metadata["duplicate_of"] == 2
+
+
+def test_extract_batch_skips_duplicates_with_shared_deadline_even_if_start_dates_differ():
+    client = FakeLLMClient(
+        [
+            _event_response(
+                "2025-06-03T00:00:00",
+                title="Международная Премия #МЫВМЕСТЕ",
+                venue_name=None,
+                city=None,
+            ),
+            _event_response(
+                "2025-06-23T00:00:00",
+                title="Международная Премия #МЫВМЕСТЕ",
+                venue_name=None,
+                city=None,
+            ),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(
+                text="Успевайте подать заявку на Международную Премию #МЫВМЕСТЕ до 23 июня.",
+                published_at="2025-06-03T13:10:07+00:00",
+            ),
+            SourcePost(
+                text="Подать заявку на Международную Премию #МЫВМЕСТЕ можно до 23 июня.",
+                published_at="2025-06-16T12:38:29+00:00",
+            ),
+        ]
+    )
+
+    assert result.extracted == 1
+    assert result.skipped == 1
+    assert result.outcomes[0].status == ExtractionStatus.SKIPPED
+    assert result.outcomes[0].errors[0].code == "duplicate_event"
+    assert result.outcomes[1].status == ExtractionStatus.EXTRACTED
 
 
 def test_extract_batch_can_keep_semantic_event_duplicates():

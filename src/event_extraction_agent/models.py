@@ -277,6 +277,7 @@ class ExtractionOutcome(BaseModel):
 
     status: ExtractionStatus
     event: Event | None
+    events: list[Event] | None = None
     post: SourcePost
     errors: list[ExtractionError] = Field(default_factory=list)
     raw_llm_metadata: dict[str, Any] | None = None

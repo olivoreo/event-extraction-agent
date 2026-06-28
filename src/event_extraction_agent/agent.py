@@ -82,6 +82,14 @@ _DATE_RANGE_TIME_PATTERN = re.compile(
     r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b",
     re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
+_LISTED_DATES_TIME_PATTERN = re.compile(
+    rf"\b(?P<days>\d{{1,2}}(?:\s*(?:,|и)\s*\d{{1,2}})+)\s*(?P<month>{_MONTH_PATTERN})\b"
+    r"(?:(?:(?!\b\d{1,2}\s*(?:"
+    + _MONTH_PATTERN
+    + r")\b).){0,80}?)"
+    r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b",
+    re.IGNORECASE | re.UNICODE | re.DOTALL,
+)
 _DATE_PATTERN = re.compile(
     rf"\b(?P<day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
     re.IGNORECASE | re.UNICODE,
@@ -379,8 +387,13 @@ class ExtractionAgent:
                 metadata=self.last_metadata,
             )
 
-        event_payload = response_payload.get("event")
-        if not isinstance(event_payload, dict):
+        published_at = post.published_at_for_prompt()
+        event_payloads = _expand_event_payloads(
+            _response_event_payloads(response_payload),
+            raw_text=raw_text,
+            published_at=published_at,
+        )
+        if not event_payloads:
             return _outcome(
                 status=ExtractionStatus.LLM_ERROR,
                 post=post,
@@ -388,32 +401,43 @@ class ExtractionAgent:
                 metadata=self.last_metadata,
             )
 
-        event_payload = _repair_event_payload(
-            event_payload,
-            raw_text=raw_text,
-            published_at=post.published_at_for_prompt(),
-        )
-        event_payload = self._refine_event_type(event_payload, raw_text=raw_text)
-        event_payload = _with_source_metadata(
-            event_payload,
-            raw_text=raw_text,
-            source_name=post.source_name,
-            source_url=post.source_url,
-        )
-        validation = validate_extraction_result(event_payload)
-        if not validation.is_valid:
+        validated_events: list[Event] = []
+        validation_errors: list[ExtractionError] = []
+        prefix_errors = len(event_payloads) > 1
+        for event_index, event_payload in enumerate(event_payloads):
+            event_payload = _repair_event_payload(
+                event_payload,
+                raw_text=raw_text,
+                published_at=published_at,
+            )
+            event_payload = self._refine_event_type(event_payload, raw_text=raw_text)
+            event_payload = _with_source_metadata(
+                event_payload,
+                raw_text=raw_text,
+                source_name=post.source_name,
+                source_url=post.source_url,
+            )
+            validation = validate_extraction_result(event_payload)
+            if validation.is_valid and validation.event is not None:
+                validated_events.append(validation.event)
+            else:
+                prefix = f"events.{event_index}" if prefix_errors else None
+                validation_errors.extend(_issue_to_error(issue, prefix=prefix) for issue in validation.errors)
+
+        if validation_errors:
             return _outcome(
                 status=ExtractionStatus.INVALID,
                 post=post,
-                errors=[_issue_to_error(issue) for issue in validation.errors],
+                errors=validation_errors,
                 metadata=self.last_metadata,
             )
 
-        assert validation.event is not None
+        event = validated_events[0]
         return _outcome(
             status=ExtractionStatus.EXTRACTED,
             post=post,
-            event=validation.event,
+            event=event,
+            events=validated_events,
             metadata=self.last_metadata,
         )
 
@@ -609,6 +633,33 @@ def _parse_llm_json(content: str) -> dict[str, Any]:
     return payload
 
 
+def _response_event_payloads(response_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    events = response_payload.get("events")
+    if isinstance(events, list):
+        payloads = [item for item in events if isinstance(item, dict)]
+        if payloads:
+            return payloads
+    event = response_payload.get("event")
+    if isinstance(event, dict):
+        return [event]
+    return []
+
+
+def _expand_event_payloads(payloads: list[dict[str, Any]], raw_text: str, published_at: str | None) -> list[dict[str, Any]]:
+    if len(payloads) != 1:
+        return payloads
+    repeated_starts = _non_contiguous_repeated_starts(raw_text, published_at)
+    if len(repeated_starts) < 2:
+        return payloads
+    expanded = []
+    for start_at in repeated_starts:
+        copied = dict(payloads[0])
+        copied["start_at"] = start_at
+        copied["end_at"] = None
+        expanded.append(copied)
+    return expanded
+
+
 def _with_source_metadata(
     payload: dict[str, Any],
     raw_text: str,
@@ -741,6 +792,29 @@ def _extract_deadline_at(raw_text: str, published_at: str | None) -> str | None:
     )
 
 
+def _non_contiguous_repeated_starts(raw_text: str, published_at: str | None) -> list[str]:
+    match = _LISTED_DATES_TIME_PATTERN.search(raw_text)
+    if match is None:
+        return []
+    days = [int(value) for value in re.findall(r"\d{1,2}", match.group("days"))]
+    if len(days) < 2 or _is_consecutive(days):
+        return []
+
+    month = _MONTHS[match.group("month").lower()]
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    starts = [
+        _build_start_at(day=day, month=month, hour=hour, minute=minute, published_at=published_at)
+        for day in days
+    ]
+    return [value for value in starts if value is not None]
+
+
+def _is_consecutive(values: list[int]) -> bool:
+    ordered = sorted(values)
+    return all(right - left == 1 for left, right in zip(ordered, ordered[1:]))
+
+
 def _build_start_at(day: int, month: int, hour: int, minute: int, published_at: str | None) -> str | None:
     if not (1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
         return None
@@ -834,6 +908,7 @@ def _duplicate_event_outcome(outcome: ExtractionOutcome, keep_index: int) -> Ext
         update={
             "status": ExtractionStatus.SKIPPED,
             "event": None,
+            "events": None,
             "errors": [_error("event", "duplicate_event", "event duplicates a later extracted event")],
             "raw_llm_metadata": metadata,
         }
@@ -1076,20 +1151,23 @@ def _outcome(
     status: ExtractionStatus,
     post: SourcePost,
     event: Event | None = None,
+    events: list[Event] | None = None,
     errors: list[ExtractionError] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ExtractionOutcome:
     return ExtractionOutcome(
         status=status,
         event=event,
+        events=events,
         post=post,
         errors=errors or [],
         raw_llm_metadata=metadata or None,
     )
 
 
-def _issue_to_error(issue: ValidationIssue) -> ExtractionError:
-    return _error(issue.field, issue.code, issue.message)
+def _issue_to_error(issue: ValidationIssue, prefix: str | None = None) -> ExtractionError:
+    field = f"{prefix}.{issue.field}" if prefix else issue.field
+    return _error(field, issue.code, issue.message)
 
 
 def _error(field: str, code: str, message: str) -> ExtractionError:
