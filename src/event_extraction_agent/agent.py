@@ -96,13 +96,25 @@ _GIVEAWAY_RESULT_WORDS = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 _PAST_REPORT_WORDS = re.compile(
-    r"\b(состоял(?:ся|ась|ось|ись)|прош[её]л|прошла|прошло|отметили|смотрели|собрал[аои]?|"
+    r"\b(состоял(?:ся|ась|ось|ись)|прош[её]л|прошла|прошло|отметили|смотрели|собрал[аои]?|посетител(?:ями|и)\s+стал[ио]|"
     r"стал[ао]?\s+(?:для\s+\S+\s+)?(?:праздником|опытом|традицией)|спасибо\s+(?:каждому|всем))\b",
     re.IGNORECASE | re.UNICODE,
 )
 _ADMISSION_AD_WORDS = re.compile(
     r"\b(подать\s+документы|поступлени[ея]|прием\s+документов|приём\s+документов|"
     r"программа\s+(?:высшего\s+)?образования|колледж|университет)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_APPLICATION_ACTIVITY_WORDS = re.compile(
+    r"\b(при[её]м\s+заявок|подать\s+заявк[уыи]?|пода(?:й|вайте)\s+заявк[уыи]?|регистрац|дедлайн|голосовани[ея]\s+.+продолжается)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_DEADLINE_DATE_PATTERN = re.compile(
+    rf"\b(?:до|дедлайн:?)\s+(?P<day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_EXPLICIT_END_TIME_WORDS = re.compile(
+    r"\b(?:до|по|окончание|завершение|финал|итоги|результаты)\b",
     re.IGNORECASE | re.UNICODE,
 )
 _DUPLICATE_TITLE_STOPWORDS = {
@@ -623,6 +635,8 @@ def _repair_event_payload(payload: dict[str, Any], raw_text: str, published_at: 
         inferred_start_at = _extract_start_at(raw_text, published_at)
         if inferred_start_at is not None:
             copied["start_at"] = inferred_start_at
+    _repair_application_dates(copied, raw_text=raw_text, published_at=published_at)
+    _drop_inferred_duration_end_at(copied, raw_text=raw_text)
     if _is_missing_value(copied.get("price_text")):
         copied["price_text"] = "free"
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
@@ -634,6 +648,33 @@ def _repair_event_payload(payload: dict[str, Any], raw_text: str, published_at: 
     if copied.get("event_status") == "unknown":
         copied["event_status"] = "EventScheduled"
     return copied
+
+
+def _repair_application_dates(payload: dict[str, Any], raw_text: str, published_at: str | None) -> None:
+    if not _APPLICATION_ACTIVITY_WORDS.search(raw_text):
+        return
+    deadline = _extract_deadline_at(raw_text, published_at)
+    published_date = _published_date(published_at)
+    if deadline is None or published_date is None:
+        return
+
+    if _same_date(payload.get("start_at"), deadline):
+        payload["start_at"] = datetime.combine(published_date, time()).isoformat()
+        if _is_missing_value(payload.get("end_at")):
+            payload["end_at"] = deadline
+
+
+def _drop_inferred_duration_end_at(payload: dict[str, Any], raw_text: str) -> None:
+    start_at = _parse_datetime_value(payload.get("start_at"))
+    end_at = _parse_datetime_value(payload.get("end_at"))
+    if start_at is None or end_at is None:
+        return
+    if start_at.date() != end_at.date() or end_at <= start_at:
+        return
+    if _EXPLICIT_END_TIME_WORDS.search(raw_text):
+        return
+    if "продолжительность" in raw_text.lower() or re.search(r"\b\d+(?:[,.]\d+)?\s*час", raw_text, re.IGNORECASE):
+        payload["end_at"] = None
 
 
 def _obvious_non_announcement_reason(raw_text: str) -> str | None:
@@ -678,6 +719,19 @@ def _extract_start_at(raw_text: str, published_at: str | None) -> str | None:
     if match is None:
         return None
 
+    return _build_start_at(
+        day=int(match.group("day")),
+        month=_MONTHS[match.group("month").lower()],
+        hour=0,
+        minute=0,
+        published_at=published_at,
+    )
+
+
+def _extract_deadline_at(raw_text: str, published_at: str | None) -> str | None:
+    match = _DEADLINE_DATE_PATTERN.search(raw_text)
+    if match is None:
+        return None
     return _build_start_at(
         day=int(match.group("day")),
         month=_MONTHS[match.group("month").lower()],
@@ -758,9 +812,14 @@ def _deduplicate_event_outcomes(
 def _events_are_duplicates(left: ExtractionOutcome, right: ExtractionOutcome) -> bool:
     if left.event is None or right.event is None:
         return False
-    if _title_containment(left.event.title, right.event.title) < 0.65:
+    title_score = _title_containment(left.event.title, right.event.title)
+    if title_score < 0.65:
         return False
-    if not _event_dates_are_close(left.event.start_at, right.event.start_at):
+    if not _event_dates_are_close(left.event.start_at, right.event.start_at) and not _texts_share_event_date(
+        left.post.raw_text_for_prompt(),
+        right.post.raw_text_for_prompt(),
+        title_score=title_score,
+    ):
         return False
     return _locations_are_compatible(left.event.city, right.event.city) and _locations_are_compatible(
         left.event.venue_name,
@@ -797,6 +856,33 @@ def _title_tokens(value: str) -> set[str]:
 
 def _event_dates_are_close(left: datetime, right: datetime) -> bool:
     return abs((left.date() - right.date()).days) <= 3
+
+
+def _texts_share_event_date(left: str, right: str, *, title_score: float) -> bool:
+    if title_score < 0.8:
+        return False
+    return bool(_text_date_tokens(left) & _text_date_tokens(right))
+
+
+def _text_date_tokens(value: str) -> set[str]:
+    return {f"{match.group('day')}.{_MONTHS[match.group('month').lower()]}" for match in _DATE_PATTERN.finditer(value)}
+
+
+def _same_date(value: Any, iso_datetime: str) -> bool:
+    left = _parse_datetime_value(value)
+    right = _parse_datetime_value(iso_datetime)
+    return left is not None and right is not None and left.date() == right.date()
+
+
+def _parse_datetime_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(_DATETIME_OFFSET_SUFFIX.sub(r"\1", value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _locations_are_compatible(left: str | None, right: str | None) -> bool:
