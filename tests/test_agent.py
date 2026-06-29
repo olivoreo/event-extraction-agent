@@ -142,7 +142,7 @@ def test_extract_returns_llm_error_for_malformed_json():
     assert outcome.errors[0].code == "llm_error"
 
 
-def test_extract_marks_event_without_date_as_invalid():
+def test_extract_allows_event_without_start_at():
     client = FakeLLMClient(
         json.dumps(
             {
@@ -156,9 +156,9 @@ def test_extract_marks_event_without_date_as_invalid():
 
     outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text="Скоро пройдет встреча."))
 
-    assert outcome.status == ExtractionStatus.INVALID
-    assert outcome.event is None
-    assert any(error.field == "start_at" and error.code == "missing_start_at" for error in outcome.errors)
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at is None
 
 
 def test_extract_repairs_start_at_from_russian_date_and_time():
@@ -257,7 +257,7 @@ def test_extract_repairs_deadline_used_as_application_start_at():
 
     assert outcome.status == ExtractionStatus.EXTRACTED
     assert outcome.event is not None
-    assert outcome.event.start_at.isoformat() == "2025-06-03T00:00:00"
+    assert outcome.event.start_at is None
     assert outcome.event.end_at is not None
     assert outcome.event.end_at.isoformat() == "2025-06-23T00:00:00"
 

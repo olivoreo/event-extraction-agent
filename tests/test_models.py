@@ -65,9 +65,15 @@ def test_event_validates_contract_fields():
 
 
 def test_event_requires_core_fields():
-    for field in ["title", "start_at", "timezone", "language", "raw_text"]:
+    for field in ["title", "timezone", "language", "raw_text"]:
         with pytest.raises(ValidationError):
             Event(**{**VALID_EVENT_DATA, field: None})
+
+
+def test_event_allows_missing_start_at():
+    event = Event(**{**VALID_EVENT_DATA, "start_at": None, "end_at": "2026-06-20T00:00:00"})
+
+    assert event.start_at is None
 
 
 def test_event_has_no_persistence_fields():

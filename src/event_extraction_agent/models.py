@@ -196,7 +196,7 @@ class Event(BaseModel):
 
     title: str
     description: str | None = None
-    start_at: datetime
+    start_at: datetime | None = None
     end_at: datetime | None = None
     timezone: str
     city: str | None = None

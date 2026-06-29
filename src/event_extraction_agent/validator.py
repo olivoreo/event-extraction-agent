@@ -36,20 +36,6 @@ def validate_extraction_result(payload: Any) -> ValidationResult:
             ],
         )
 
-    start_at = payload.get("start_at")
-    if start_at is None or (isinstance(start_at, str) and start_at.strip().lower() in {"", "unknown", "null"}):
-        return ValidationResult(
-            is_valid=False,
-            event=None,
-            errors=[
-                ValidationIssue(
-                    field="start_at",
-                    code="missing_start_at",
-                    message="event start date/time must be present and must not be invented",
-                )
-            ],
-        )
-
     try:
         event = Event(**payload)
     except ValidationError as error:
