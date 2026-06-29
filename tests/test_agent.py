@@ -437,6 +437,34 @@ def test_extract_omits_events_for_single_event_list_from_llm():
     assert outcome.events is None
 
 
+def test_extract_accepts_events_without_duplicate_event_from_llm():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": None,
+                "events": [
+                    _event_payload(start_at="2026-05-09T18:00:00", title="Спектакль"),
+                    _event_payload(start_at="2026-05-11T18:00:00", title="Спектакль"),
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text=RAW_TEXT))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-05-09T18:00:00"
+    assert outcome.events is not None
+    assert [event.start_at.isoformat() for event in outcome.events] == [
+        "2026-05-09T18:00:00",
+        "2026-05-11T18:00:00",
+    ]
+
+
 def test_extract_strips_timezone_offset_from_llm_datetimes():
     client = FakeLLMClient(
         json.dumps(
