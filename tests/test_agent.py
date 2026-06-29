@@ -393,12 +393,31 @@ def test_extract_keeps_consecutive_listed_dates_as_single_event():
     )
 
     assert outcome.status == ExtractionStatus.EXTRACTED
-    assert outcome.events is not None
-    assert len(outcome.events) == 1
+    assert outcome.events is None
     assert outcome.event is not None
     assert outcome.event.start_at.isoformat() == "2026-01-03T14:00:00"
     assert outcome.event.end_at is not None
     assert outcome.event.end_at.isoformat() == "2026-01-05T17:00:00"
+
+
+def test_extract_omits_events_for_single_event_list_from_llm():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-06-05T18:00:00"),
+                "events": [_event_payload(start_at="2026-06-05T18:00:00")],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text=RAW_TEXT))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.events is None
 
 
 def test_extract_strips_timezone_offset_from_llm_datetimes():
@@ -665,11 +684,12 @@ def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
         ExtractionStatus.EXTRACTED,
         ExtractionStatus.SKIPPED,
         ExtractionStatus.SKIPPED,
-        ExtractionStatus.INVALID,
+        ExtractionStatus.EXTRACTED,
     ]
     assert outcomes[1].errors[0].code == "duplicate_post"
     assert outcomes[2].errors[0].code == "not_event_announcement"
-    assert outcomes[3].errors[0].code == "missing_start_at"
+    assert outcomes[3].event is not None
+    assert outcomes[3].event.start_at is None
     assert len(client.calls) == 3
 
 
@@ -781,7 +801,10 @@ def test_extract_batch_returns_summary_and_applies_error_limit():
             {
                 "is_event": True,
                 "skip_reason": None,
-                "event": _event_payload(start_at=None),
+                "event": {
+                    **_event_payload(start_at="2026-06-05T18:00:00"),
+                    "end_at": "2026-06-01T18:00:00",
+                },
             },
             ensure_ascii=False,
         )

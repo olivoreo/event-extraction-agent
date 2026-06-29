@@ -437,7 +437,7 @@ class ExtractionAgent:
             status=ExtractionStatus.EXTRACTED,
             post=post,
             event=event,
-            events=validated_events,
+            events=validated_events if len(validated_events) > 1 else None,
             metadata=self.last_metadata,
         )
 
@@ -673,7 +673,11 @@ def _with_source_metadata(
     return copied
 
 
-def _repair_event_payload(payload: dict[str, Any], raw_text: str, published_at: str | None) -> dict[str, Any]:
+def _repair_event_payload(
+    payload: dict[str, Any],
+    raw_text: str,
+    published_at: str | None,
+) -> dict[str, Any]:
     copied = {key: value for key, value in payload.items() if key in _EVENT_FIELDS}
     if not isinstance(copied.get("title"), str) or not copied.get("title", "").strip():
         copied["title"] = _infer_title(raw_text)
@@ -705,12 +709,11 @@ def _repair_application_dates(payload: dict[str, Any], raw_text: str, published_
     if not _APPLICATION_ACTIVITY_WORDS.search(raw_text):
         return
     deadline = _extract_deadline_at(raw_text, published_at)
-    published_date = _published_date(published_at)
-    if deadline is None or published_date is None:
+    if deadline is None:
         return
 
     if _same_date(payload.get("start_at"), deadline):
-        payload["start_at"] = datetime.combine(published_date, time()).isoformat()
+        payload["start_at"] = None
         if _is_missing_value(payload.get("end_at")):
             payload["end_at"] = deadline
 
@@ -929,7 +932,9 @@ def _title_tokens(value: str) -> set[str]:
     return significant or tokens
 
 
-def _event_dates_are_close(left: datetime, right: datetime) -> bool:
+def _event_dates_are_close(left: datetime | None, right: datetime | None) -> bool:
+    if left is None or right is None:
+        return False
     return abs((left.date() - right.date()).days) <= 3
 
 
