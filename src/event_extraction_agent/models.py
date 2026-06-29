@@ -70,11 +70,8 @@ class ExtractionAgentConfig(BaseModel):
 
     main_client: Any | None = None
     refinement_client: Any | None = None
-    main_model: str | None = None
-    refinement_model: str | None = None
     use_event_type_refinement: bool = True
     current_datetime: str | None = None
-    request_timeout_seconds: float = 120.0
     min_request_interval_seconds: float = 0.0
     max_retries: int = 0
 
@@ -83,23 +80,6 @@ class ExtractionAgentConfig(BaseModel):
     def client_must_implement_complete(cls, value: Any | None) -> Any | None:
         if value is not None and not callable(getattr(value, "complete", None)):
             raise ValueError("LLM client must implement complete(system_prompt, user_prompt)")
-        return value
-
-    @field_validator("main_model", "refinement_model")
-    @classmethod
-    def model_name_must_not_be_blank(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("model name must not be blank")
-        return normalized
-
-    @field_validator("request_timeout_seconds")
-    @classmethod
-    def request_timeout_must_be_positive(cls, value: float) -> float:
-        if value <= 0:
-            raise ValueError("request_timeout_seconds must be greater than 0")
         return value
 
     @field_validator("min_request_interval_seconds")

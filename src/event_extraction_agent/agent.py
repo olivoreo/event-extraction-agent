@@ -314,7 +314,10 @@ class ExtractionAgent:
         self.llm_client = llm_client or self.config.main_client
         if self.llm_client is None:
             raise ValueError("llm_client is required; pass it directly or set config.main_client")
-        self.refinement_llm_client = refinement_llm_client or self.config.refinement_client or self.llm_client
+        if self.config.use_event_type_refinement:
+            self.refinement_llm_client = refinement_llm_client or self.config.refinement_client or self.llm_client
+        else:
+            self.refinement_llm_client = None
         self.current_datetime = current_datetime or self.config.current_datetime
         self.rate_limiter = (
             RequestRateLimiter(self.config.min_request_interval_seconds)
@@ -1125,17 +1128,16 @@ def _metadata(
     refinement_client: LLMClient | None,
     previous_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    active_model = _client_model_name(client, main_client, refinement_client, config)
+    active_model = _client_model_name(client)
     metadata = {
         "llm_model": active_model,
-        "main_model": getattr(main_client, "model", None) or config.main_model,
-        "refinement_model": getattr(refinement_client, "model", None) or config.refinement_model,
+        "main_model": getattr(main_client, "model", None),
+        "refinement_model": getattr(refinement_client, "model", None),
         "active_model": active_model,
         "active_stage": stage,
         "external_id": external_id,
         "current_datetime": current_datetime,
         "event_type_refinement_enabled": config.use_event_type_refinement,
-        "request_timeout_seconds": config.request_timeout_seconds,
         "min_request_interval_seconds": config.min_request_interval_seconds,
         "max_retries": config.max_retries,
     }
@@ -1147,18 +1149,8 @@ def _metadata(
 
 def _client_model_name(
     client: LLMClient,
-    main_client: LLMClient,
-    refinement_client: LLMClient | None,
-    config: ExtractionAgentConfig,
 ) -> str | None:
-    model_name = getattr(client, "model", None)
-    if model_name is not None:
-        return model_name
-    if client is main_client:
-        return config.main_model
-    if refinement_client is not None and client is refinement_client:
-        return config.refinement_model
-    return None
+    return getattr(client, "model", None)
 
 
 def _outcome(

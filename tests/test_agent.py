@@ -614,6 +614,7 @@ def test_event_type_refinement_uses_config_refinement_client():
         config=ExtractionAgentConfig(
             main_client=main_client,
             refinement_client=refinement_client,
+            use_event_type_refinement=True,
         )
     ).extract(SourcePost(text=RAW_TEXT))
 
@@ -653,6 +654,7 @@ def test_config_disables_event_type_refinement():
     assert len(refinement_client.calls) == 0
     assert outcome.raw_llm_metadata is not None
     assert outcome.raw_llm_metadata["event_type_refinement"] == "disabled"
+    assert outcome.raw_llm_metadata["refinement_model"] is None
 
 
 def test_agent_config_controls_prompt_datetime_and_agent_retries():
@@ -674,7 +676,6 @@ def test_agent_config_controls_prompt_datetime_and_agent_retries():
         llm_client=client,
         config=ExtractionAgentConfig(
             current_datetime="2026-06-04T12:00:00+03:00",
-            request_timeout_seconds=30,
             max_retries=1,
         ),
     ).extract(SourcePost(text=RAW_TEXT))
@@ -684,7 +685,6 @@ def test_agent_config_controls_prompt_datetime_and_agent_retries():
     assert "2026-06-04T12:00:00+03:00" in client.calls[0][1]
     assert outcome.raw_llm_metadata is not None
     assert outcome.raw_llm_metadata["current_datetime"] == "2026-06-04T12:00:00+03:00"
-    assert outcome.raw_llm_metadata["request_timeout_seconds"] == 30
     assert outcome.raw_llm_metadata["max_retries"] == 1
 
 

@@ -46,7 +46,7 @@ def main() -> None:
             main_client=LoggingClient(_build_client(env), "main"),
             refinement_client=_wrap_refinement_client(_build_refinement_client(env)),
             current_datetime=env.get("CURRENT_DATETIME") or None,
-            use_event_type_refinement=_bool(env.get("USE_EVENT_TYPE_REFINEMENT", "true")),
+            use_event_type_refinement=_bool(env.get("USE_EVENT_TYPE_REFINEMENT", "false")),
             min_request_interval_seconds=float(env.get("MIN_REQUEST_INTERVAL_SECONDS", "0")),
             max_retries=int(env.get("MAX_RETRIES", "0")),
         ),
@@ -85,6 +85,7 @@ class LoggingClient:
         self.client = client
         self.label = label
         self.calls = 0
+        self.model = getattr(client, "model", None)
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         self.calls += 1
