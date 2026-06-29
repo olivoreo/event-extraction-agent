@@ -335,6 +335,24 @@ class ExtractionAgent:
     ) -> ExtractionOutcome:
         current_datetime = self.current_datetime or _current_datetime()
         raw_text = post.raw_text_for_prompt()
+        skip_reason = _obvious_non_announcement_reason(raw_text)
+        if skip_reason is not None:
+            self.last_metadata = _metadata(
+                client=client,
+                main_client=self.llm_client,
+                stage=stage,
+                external_id=post.external_id,
+                current_datetime=current_datetime,
+                config=self.config,
+                refinement_client=self.refinement_llm_client,
+                previous_metadata=previous_metadata,
+            )
+            return _outcome(
+                status=ExtractionStatus.SKIPPED,
+                post=post,
+                errors=[_error("root", skip_reason, "post is not an event announcement")],
+                metadata=self.last_metadata,
+            )
         prompt = build_extraction_prompt(
             raw_text=raw_text,
             source_name=post.source_name,
@@ -366,15 +384,6 @@ class ExtractionAgent:
                 metadata=self.last_metadata,
         )
         self._add_llm_attempt(stage=stage, client=client, success=True)
-
-        skip_reason = _obvious_non_announcement_reason(raw_text)
-        if skip_reason is not None:
-            return _outcome(
-                status=ExtractionStatus.SKIPPED,
-                post=post,
-                errors=[_error("root", skip_reason, "post is not an event announcement")],
-                metadata=self.last_metadata,
-            )
 
         if response_payload.get("is_event") is False:
             reason = response_payload.get("skip_reason")

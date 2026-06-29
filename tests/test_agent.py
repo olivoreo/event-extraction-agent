@@ -454,6 +454,7 @@ def test_extract_overrides_giveaway_result_as_non_announcement():
     assert outcome.status == ExtractionStatus.SKIPPED
     assert outcome.event is None
     assert outcome.errors[0].code == "not_event_announcement"
+    assert len(client.calls) == 0
 
 
 def test_extract_overrides_past_report_as_non_announcement():
@@ -466,6 +467,7 @@ def test_extract_overrides_past_report_as_non_announcement():
     assert outcome.status == ExtractionStatus.SKIPPED
     assert outcome.event is None
     assert outcome.errors[0].code == "past_event_report"
+    assert len(client.calls) == 0
 
 
 def test_extract_overrides_sostoyalsya_report_as_non_announcement():
@@ -478,6 +480,7 @@ def test_extract_overrides_sostoyalsya_report_as_non_announcement():
     assert outcome.status == ExtractionStatus.SKIPPED
     assert outcome.event is None
     assert outcome.errors[0].code == "past_event_report"
+    assert len(client.calls) == 0
 
 
 def test_extract_overrides_visitor_count_report_as_non_announcement():
@@ -490,6 +493,7 @@ def test_extract_overrides_visitor_count_report_as_non_announcement():
     assert outcome.status == ExtractionStatus.SKIPPED
     assert outcome.event is None
     assert outcome.errors[0].code == "past_event_report"
+    assert len(client.calls) == 0
 
 
 def test_extract_overrides_admission_ad_without_date_as_non_announcement():
@@ -504,6 +508,7 @@ def test_extract_overrides_admission_ad_without_date_as_non_announcement():
     assert outcome.status == ExtractionStatus.SKIPPED
     assert outcome.event is None
     assert outcome.errors[0].code == "not_event_announcement"
+    assert len(client.calls) == 0
 
 
 def test_event_type_refinement_uses_refinement_client():
