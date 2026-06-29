@@ -9,6 +9,7 @@ from event_extraction_agent import (
     ExtractionStatus,
     SourcePost,
 )
+from event_extraction_agent.prompts import build_extraction_prompt
 
 
 RAW_TEXT = (
@@ -92,6 +93,22 @@ def test_extract_sends_raw_text_to_llm_when_present():
     assert "🎭" not in client.calls[0][1]
     assert outcome.event is not None
     assert outcome.event.raw_text == "5 июня в 18:00 пройдет лекция."
+
+
+def test_extraction_prompt_omits_locally_injected_output_fields():
+    prompt = build_extraction_prompt(
+        raw_text="5 июня в 18:00 пройдет лекция.",
+        source_name="Лекторий",
+        source_url="https://vk.com/wall-1_1",
+    )
+
+    schema = prompt.split("skip_reason values:", maxsplit=1)[0]
+
+    assert '"raw_text"' not in schema
+    assert '"source_name"' not in schema
+    assert '"source_url"' not in schema
+    assert "metadata:" in prompt
+    assert "raw_text: 5 июня в 18:00 пройдет лекция." in prompt
 
 
 def test_agent_can_take_main_client_from_config():
