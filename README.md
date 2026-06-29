@@ -57,7 +57,7 @@ for outcome in result.outcomes:
         print(outcome.status, outcome.errors)
 ```
 
-Минимально в `ExtractionAgentConfig` нужно передать `main_client`. Если `refinement_client` не задан, уточнение типа события выполняется тем же клиентом.
+Минимально в `ExtractionAgentConfig` нужно передать `main_client`. Уточнение типа события (`use_event_type_refinement`) по умолчанию выключено, чтобы не делать второй LLM-запрос на часть постов.
 
 ## Сохранение результата
 
@@ -135,20 +135,20 @@ for error in fetch_result.errors:
 
 По умолчанию `VKSource` использует rate limit `20` запросов в секунду и retry/backoff для временных ошибок VK, HTTP `429`/`5xx` и сетевых сбоев.
 
-## Настройка агента
+## Настройка агента и клиентов
 
-Все настройки LLM и extraction-поведения передаются через `ExtractionAgentConfig`:
+`ExtractionAgentConfig` управляет поведением агента: клиентами, датой для prompt, паузой между LLM-вызовами, retry на уровне агента и включением дополнительного уточнения `event_type`.
 
 ```python
 config = ExtractionAgentConfig(
     main_client=main_client,
-    refinement_client=refinement_client,
-    use_event_type_refinement=True,
     current_datetime="2026-06-10T12:00:00+03:00",
-    min_request_interval_seconds=2.1,
-    max_retries=1,
+    min_request_interval_seconds=1.1,
+    max_retries=0,
 )
 ```
+
+`refinement_client` нужен только если включен `use_event_type_refinement=True`. Если он не задан, refinement будет использовать `main_client`.
 
 Поддерживается любой LLM-клиент с методом:
 
@@ -160,6 +160,37 @@ complete(system_prompt: str, user_prompt: str) -> str
 
 - `OllamaChatClient`
 - `GroqChatClient`
+
+Таймауты и retry HTTP-запросов настраиваются у самих клиентов:
+
+```python
+client = GroqChatClient(
+    api_key="...",
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
+    timeout_seconds=60,
+    max_retries=3,
+)
+```
+
+`max_retries` в `ExtractionAgentConfig` повторяет весь `client.complete(...)`. Обычно достаточно оставить его `0` и использовать retry клиента.
+
+## Запуск из `.env`
+
+Скрипты из `scripts/` читают `.sandbox/.env`. Основные параметры:
+
+```env
+REQUEST_TIMEOUT_SECONDS=120
+MIN_REQUEST_INTERVAL_SECONDS=0
+MAX_RETRIES=0
+GROQ_MAX_RETRIES=3
+USE_EVENT_TYPE_REFINEMENT=false
+```
+
+- `REQUEST_TIMEOUT_SECONDS` передается в `OllamaChatClient`/`GroqChatClient` как timeout одного HTTP-запроса.
+- `MIN_REQUEST_INTERVAL_SECONDS` задает минимальную паузу между LLM-вызовами агента.
+- `MAX_RETRIES` повторяет весь вызов агента после ошибки клиента.
+- `GROQ_MAX_RETRIES` повторяет HTTP-запросы Groq-клиента на `429`/`5xx`.
+- `USE_EVENT_TYPE_REFINEMENT=false` экономит токены и запросы; включайте только если нужно дополнительно уточнять `event_type`.
 
 ## Что возвращает pipeline
 
