@@ -113,6 +113,10 @@ _ADMISSION_AD_WORDS = re.compile(
     r"программа\s+(?:высшего\s+)?образования|колледж|университет)\b",
     re.IGNORECASE | re.UNICODE,
 )
+_CANCELLATION_UPDATE_WORDS = re.compile(
+    r"\b(отмена|отмен[её]н[аоы]?|отменяется|отменили|не\s+состоится)\b",
+    re.IGNORECASE | re.UNICODE,
+)
 _APPLICATION_ACTIVITY_WORDS = re.compile(
     r"\b(при[её]м\s+заявок|подать\s+заявк[уыи]?|пода(?:й|вайте)\s+заявк[уыи]?|регистрац|дедлайн|голосовани[ея]\s+.+продолжается)\b",
     re.IGNORECASE | re.UNICODE,
@@ -744,6 +748,8 @@ def _drop_inferred_duration_end_at(payload: dict[str, Any], raw_text: str) -> No
 
 
 def _obvious_non_announcement_reason(raw_text: str) -> str | None:
+    if _CANCELLATION_UPDATE_WORDS.search(raw_text):
+        return "not_event_announcement"
     if _GIVEAWAY_RESULT_WORDS.search(raw_text):
         return "not_event_announcement"
     if _PAST_REPORT_WORDS.search(raw_text):
