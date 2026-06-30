@@ -9,7 +9,7 @@ from event_extraction_agent import (
     ExtractionStatus,
     SourcePost,
 )
-from event_extraction_agent.prompts import build_extraction_prompt
+from event_extraction_agent.prompts import SYSTEM_PROMPT, build_extraction_prompt
 
 
 RAW_TEXT = (
@@ -65,7 +65,7 @@ def test_extract_returns_outcome_with_event():
     assert outcome.raw_llm_metadata["llm_model"] == "fake-model"
     assert outcome.raw_llm_metadata["external_id"] == "vk:wall-1_1"
     assert outcome.raw_llm_metadata["active_stage"] == "main_extraction"
-    assert outcome.raw_llm_metadata["event_type_refinement"] == "not_needed"
+    assert outcome.raw_llm_metadata["event_type_refinement"] == "disabled"
     assert outcome.raw_llm_metadata["llm_attempts"] == [
         {"stage": "main_extraction", "model": "fake-model", "success": True}
     ]
@@ -107,6 +107,8 @@ def test_extraction_prompt_omits_locally_injected_output_fields():
     assert '"raw_text"' not in schema
     assert '"source_name"' not in schema
     assert '"source_url"' not in schema
+    assert '"event_status"' not in schema
+    assert "Личные истории, мнения, интервью или планы автора" in SYSTEM_PROMPT
     assert "metadata:" in prompt
     assert "raw_text: 5 июня в 18:00 пройдет лекция." in prompt
 
@@ -556,6 +558,65 @@ def test_extract_overrides_admission_ad_without_date_as_non_announcement():
     assert len(client.calls) == 0
 
 
+def test_extract_skips_personal_film_story_when_llm_marks_it_non_announcement():
+    client = FakeLLMClient(
+        json.dumps({"is_event": False, "skip_reason": "not_event_announcement", "event": None}, ensure_ascii=False)
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text=(
+                "Александра Егунова рассказала, как любит проводить свободное время. "
+                "Друзья в шутку называют меня Супердевушкой. "
+                "Мы всей компанией ждем выхода фильма «Супергерл» и договорились сходить "
+                "на премьерный показ в «Мори Синема». "
+                "А как вы предпочитаете отдыхать после насыщенной недели?"
+            )
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "not_event_announcement"
+    assert len(client.calls) == 1
+
+
+def test_extract_keeps_announcement_with_guest_opinion_without_date():
+    client = FakeLLMClient(_event_response(None, title="Встреча с режиссером"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text=(
+                "Приглашаем на встречу с режиссером после показа. "
+                "Гость рассказал, как готовился к фильму и ответит на вопросы зрителей."
+            )
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert len(client.calls) == 1
+
+
+def test_extract_overrides_cancellation_update_as_non_announcement():
+    client = FakeLLMClient(_event_response("2026-06-01T00:00:00", title="Дискотека выпускников — 2026"))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text=(
+                "ВНИМАНИЕ! ОТМЕНА! Дискотека выпускников — 2026 отменена "
+                "в связи с неблагоприятными погодными условиями. "
+                "Приносим свои извинения за доставленные неудобства."
+            )
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.SKIPPED
+    assert outcome.event is None
+    assert outcome.errors[0].code == "not_event_announcement"
+    assert len(client.calls) == 0
+
+
 def test_event_type_refinement_uses_refinement_client():
     main_client = FakeLLMClient(
         json.dumps(
@@ -572,7 +633,11 @@ def test_event_type_refinement_uses_refinement_client():
     )
     refinement_client = FakeLLMClient(json.dumps({"event_type": "CompetitionEvent"}, ensure_ascii=False))
 
-    outcome = ExtractionAgent(llm_client=main_client, refinement_llm_client=refinement_client).extract(
+    outcome = ExtractionAgent(
+        llm_client=main_client,
+        refinement_llm_client=refinement_client,
+        config=ExtractionAgentConfig(use_event_type_refinement=True),
+    ).extract(
         SourcePost(text=RAW_TEXT)
     )
 
@@ -966,7 +1031,6 @@ def _event_payload(
         "address": None,
         "event_type": "CompetitionEvent",
         "attendance_type": "OfflineEventAttendanceMode",
-        "event_status": "EventScheduled",
         "language": "ru",
         "source_name": None,
         "source_url": None,

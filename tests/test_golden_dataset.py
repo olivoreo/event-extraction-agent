@@ -15,8 +15,8 @@ def test_golden_eval_source_matches_gold_items():
     source_ids = [post.external_id for post in posts]
     gold_ids = [item["external_id"] for item in gold]
 
-    assert len(posts) == 74
-    assert len(gold) == 74
+    assert len(posts) == 76
+    assert len(gold) == 76
     assert source_ids == gold_ids
 
 

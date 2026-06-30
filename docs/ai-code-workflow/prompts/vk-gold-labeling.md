@@ -61,7 +61,6 @@ Use this prompt to create a gold dataset for comparing event extraction results.
         "address": null,
         "event_type": "EducationEvent",
         "attendance_type": "OfflineEventAttendanceMode",
-        "event_status": "EventScheduled",
         "language": "ru",
         "source_name": "...",
         "source_url": "...",

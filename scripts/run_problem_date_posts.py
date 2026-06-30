@@ -31,6 +31,8 @@ DEFAULT_PROBLEM_IDS = (
     "vk:wall-45883617_20068",
     "vk:wall-45883617_19588",
     "vk:wall-45883617_19535",
+    "problem:personal-film-story-supergirl",
+    "problem:cancelled-graduates-disco-2026",
 )
 
 
