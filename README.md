@@ -50,10 +50,11 @@ pipeline = ExtractionPipeline(
 
 result = pipeline.run()
 
+for item in result.events:
+    print(item.event.model_dump(mode="json"))
+
 for outcome in result.outcomes:
-    if outcome.event:
-        print(outcome.event.model_dump(mode="json"))
-    else:
+    if outcome.errors:
         print(outcome.status, outcome.errors)
 ```
 
@@ -196,13 +197,15 @@ USE_EVENT_TYPE_REFINEMENT=false
 
 `BatchExtractionResult` содержит:
 
+- `events`: плоский список найденных мероприятий (`ExtractedEvent`) после дедупликации;
+- `duplicate_events`: мероприятия, отброшенные дедупликацией;
 - `outcomes`: результаты по каждому посту;
 - `extracted`, `skipped`, `invalid`, `llm_errors`: счетчики статусов;
 - `cached`, `processed`: счетчики incremental-режима;
 - `error_count`, `error_limit_reached`: информация о batch-лимитах;
 - `save_json(path)` и `load_json(path)`.
 
-Каждый `ExtractionOutcome` содержит исходный `SourcePost`, статус обработки, найденное `Event` или структурированные ошибки.
+Каждый `ExtractedEvent` содержит само `Event`, исходный `SourcePost`, индекс post-outcome и индекс события внутри поста. `duplicate_of` есть только у элементов `duplicate_events` и указывает на оставленное событие во внутреннем плоском списке до дедупликации. `ExtractionOutcome` остается audit trail обработки поста: исходный `SourcePost`, статус, ошибки и сырые metadata.
 
 `Event` не содержит `event_status`: агент извлекает только само мероприятие. Посты, которые являются только сообщением об отмене уже существующего события, пропускаются как не-анонсы.
 

@@ -12,7 +12,9 @@ from typing import Any, Protocol
 from event_extraction_agent.models import (
     BatchExtractionResult,
     BatchExtractionSettings,
+    DuplicateExtractedEvent,
     Event,
+    ExtractedEvent,
     ExtractionAgentConfig,
     ExtractionError,
     ExtractionOutcome,
@@ -547,11 +549,7 @@ class ExtractionAgent:
             if outcome.status in {ExtractionStatus.INVALID, ExtractionStatus.LLM_ERROR}:
                 error_count += 1
 
-        return BatchExtractionResult.from_outcomes(
-            _deduplicate_event_outcomes(outcomes, batch_settings),
-            settings=batch_settings,
-            error_limit_reached=error_limit_reached,
-        )
+        return _batch_result(outcomes, settings=batch_settings, error_limit_reached=error_limit_reached)
 
     def extract_incremental(
         self,
@@ -588,10 +586,7 @@ class ExtractionAgent:
                 metadata["source_index"] = source_index
                 outcomes[source_index] = outcome.model_copy(update={"raw_llm_metadata": metadata})
 
-        return BatchExtractionResult.from_outcomes(
-            _deduplicate_event_outcomes([outcome for outcome in outcomes if outcome is not None], settings),
-            settings=settings,
-        )
+        return _batch_result([outcome for outcome in outcomes if outcome is not None], settings=settings)
 
     def extract_event(self, post: SourcePost) -> Event:
         outcome = self.extract(post)
@@ -860,27 +855,40 @@ def _resolve_event_date(day: int, month: int, published_at: str | None) -> date 
     return event_date
 
 
-def _deduplicate_event_outcomes(
+def _batch_result(
     outcomes: list[ExtractionOutcome],
     settings: BatchExtractionSettings | None,
-) -> list[ExtractionOutcome]:
-    if settings is not None and not settings.skip_event_duplicates:
-        return outcomes
+    error_limit_reached: bool = False,
+) -> BatchExtractionResult:
+    events, duplicate_events = _deduplicate_extracted_events(
+        BatchExtractionResult.from_outcomes(outcomes, settings=settings).events,
+        settings,
+    )
+    return BatchExtractionResult.from_outcomes(
+        outcomes,
+        settings=settings,
+        error_limit_reached=error_limit_reached,
+        events=events,
+        duplicate_events=duplicate_events,
+    )
 
-    extracted_indices = [
-        index
-        for index, outcome in enumerate(outcomes)
-        if outcome.status == ExtractionStatus.EXTRACTED and outcome.event is not None
-    ]
+
+def _deduplicate_extracted_events(
+    events: list[ExtractedEvent],
+    settings: BatchExtractionSettings | None,
+) -> tuple[list[ExtractedEvent], list[DuplicateExtractedEvent]]:
+    if settings is not None and not settings.skip_event_duplicates:
+        return events, []
+
     groups: list[list[int]] = []
 
     # ponytail: O(n²) is fine for batch post-processing; index later if batch sizes hurt.
-    for index in extracted_indices:
+    for index in range(len(events)):
         group = next(
             (
                 candidate
                 for candidate in groups
-                if any(_events_are_duplicates(outcomes[index], outcomes[other]) for other in candidate)
+                if any(_events_are_duplicates(events[index], events[other]) for other in candidate)
             ),
             None,
         )
@@ -889,46 +897,40 @@ def _deduplicate_event_outcomes(
         else:
             group.append(index)
 
-    deduplicated = list(outcomes)
+    duplicate_indices: set[int] = set()
+    duplicate_events: list[DuplicateExtractedEvent] = []
     for group in groups:
         if len(group) < 2:
             continue
-        keep_index = max(group, key=lambda index: (_published_at_sort_key(outcomes[index].post), index))
+        keep_index = max(group, key=lambda index: (_published_at_sort_key(events[index].post), index))
         for index in group:
             if index != keep_index:
-                deduplicated[index] = _duplicate_event_outcome(outcomes[index], keep_index)
-    return deduplicated
+                duplicate_indices.add(index)
+                duplicate_events.append(
+                    DuplicateExtractedEvent(
+                        **events[index].model_dump(),
+                        duplicate_of=keep_index,
+                    )
+                )
+    return [event for index, event in enumerate(events) if index not in duplicate_indices], duplicate_events
 
 
-def _events_are_duplicates(left: ExtractionOutcome, right: ExtractionOutcome) -> bool:
-    if left.event is None or right.event is None:
-        return False
+def _events_are_duplicates(left: ExtractedEvent, right: ExtractedEvent) -> bool:
     title_score = _title_containment(left.event.title, right.event.title)
     if title_score < 0.65:
         return False
-    if not _event_dates_are_close(left.event.start_at, right.event.start_at) and not _texts_share_event_date(
-        left.post.raw_text_for_prompt(),
-        right.post.raw_text_for_prompt(),
-        title_score=title_score,
-    ):
+    dates_match = _event_dates_are_close(left.event.start_at, right.event.start_at)
+    if not dates_match and (left.event.start_at is None or right.event.start_at is None):
+        dates_match = _texts_share_event_date(
+            left.post.raw_text_for_prompt(),
+            right.post.raw_text_for_prompt(),
+            title_score=title_score,
+        )
+    if not dates_match:
         return False
     return _locations_are_compatible(left.event.city, right.event.city) and _locations_are_compatible(
         left.event.venue_name,
         right.event.venue_name,
-    )
-
-
-def _duplicate_event_outcome(outcome: ExtractionOutcome, keep_index: int) -> ExtractionOutcome:
-    metadata = dict(outcome.raw_llm_metadata or {})
-    metadata["duplicate_of"] = keep_index
-    return outcome.model_copy(
-        update={
-            "status": ExtractionStatus.SKIPPED,
-            "event": None,
-            "events": None,
-            "errors": [_error("event", "duplicate_event", "event duplicates a later extracted event")],
-            "raw_llm_metadata": metadata,
-        }
     )
 
 

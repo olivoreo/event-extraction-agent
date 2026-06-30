@@ -808,7 +808,7 @@ def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
     assert len(client.calls) == 3
 
 
-def test_extract_batch_skips_semantic_event_duplicates_and_keeps_latest_post():
+def test_extract_batch_deduplicates_events_and_keeps_latest_post_event():
     client = FakeLLMClient(
         [
             _event_response(
@@ -839,20 +839,22 @@ def test_extract_batch_skips_semantic_event_duplicates_and_keeps_latest_post():
 
     result = ExtractionAgent(llm_client=client).extract_batch(posts)
 
-    assert result.extracted == 1
-    assert result.skipped == 2
+    assert result.extracted == 3
+    assert result.skipped == 0
     assert [outcome.status for outcome in result.outcomes] == [
-        ExtractionStatus.SKIPPED,
-        ExtractionStatus.SKIPPED,
+        ExtractionStatus.EXTRACTED,
+        ExtractionStatus.EXTRACTED,
         ExtractionStatus.EXTRACTED,
     ]
-    assert result.outcomes[0].errors[0].code == "duplicate_event"
-    assert result.outcomes[1].errors[0].code == "duplicate_event"
-    assert result.outcomes[0].raw_llm_metadata is not None
-    assert result.outcomes[0].raw_llm_metadata["duplicate_of"] == 2
+    assert len(result.events) == 1
+    assert result.events[0].event.title == "Фестиваль «Веретено»"
+    assert result.events[0].outcome_index == 2
+    assert "duplicate_of" not in result.events[0].model_dump()
+    assert len(result.duplicate_events) == 2
+    assert [event.duplicate_of for event in result.duplicate_events] == [2, 2]
 
 
-def test_extract_batch_skips_duplicates_with_shared_deadline_even_if_start_dates_differ():
+def test_extract_batch_deduplicates_events_with_shared_deadline_even_if_start_dates_differ():
     client = FakeLLMClient(
         [
             _event_response(
@@ -883,10 +885,13 @@ def test_extract_batch_skips_duplicates_with_shared_deadline_even_if_start_dates
         ]
     )
 
-    assert result.extracted == 1
-    assert result.skipped == 1
-    assert result.outcomes[0].status == ExtractionStatus.SKIPPED
-    assert result.outcomes[0].errors[0].code == "duplicate_event"
+    assert result.extracted == 2
+    assert result.skipped == 0
+    assert len(result.events) == 1
+    assert result.events[0].outcome_index == 1
+    assert len(result.duplicate_events) == 1
+    assert result.duplicate_events[0].outcome_index == 0
+    assert result.duplicate_events[0].duplicate_of == 1
     assert result.outcomes[1].status == ExtractionStatus.EXTRACTED
 
 
@@ -908,6 +913,64 @@ def test_extract_batch_can_keep_semantic_event_duplicates():
 
     assert result.extracted == 2
     assert result.skipped == 0
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+
+
+def test_extract_batch_deduplicates_events_inside_multi_event_posts():
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": None,
+                    "events": [
+                        _event_payload(
+                            start_at="2026-05-09T18:00:00",
+                            title="Спектакль «Василий Тёркин»",
+                            venue_name="Амфитеатр",
+                        ),
+                        _event_payload(
+                            start_at="2026-05-20T18:00:00",
+                            title="Спектакль «Василий Тёркин»",
+                            venue_name="Амфитеатр",
+                        ),
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            _event_response(
+                "2026-05-20T18:00:00",
+                title="Спектакль «Василий Тёркин»",
+                venue_name="Амфитеатр",
+                city="Волгоград",
+            ),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(
+                text="9 и 20 мая в 18:00 пройдет спектакль «Василий Тёркин».",
+                published_at="2026-05-01T12:00:00+00:00",
+            ),
+            SourcePost(
+                text="20 мая в 18:00 пройдет спектакль «Василий Тёркин».",
+                published_at="2026-05-02T12:00:00+00:00",
+            ),
+        ]
+    )
+
+    assert [outcome.status for outcome in result.outcomes] == [
+        ExtractionStatus.EXTRACTED,
+        ExtractionStatus.EXTRACTED,
+    ]
+    assert len(result.events) == 2
+    assert [(item.outcome_index, item.event_index) for item in result.events] == [(0, 0), (1, 0)]
+    assert len(result.duplicate_events) == 1
+    assert (result.duplicate_events[0].outcome_index, result.duplicate_events[0].event_index) == (0, 1)
+    assert result.duplicate_events[0].duplicate_of == 2
 
 
 def test_extract_batch_returns_summary_and_applies_error_limit():

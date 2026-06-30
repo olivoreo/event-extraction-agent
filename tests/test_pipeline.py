@@ -64,6 +64,9 @@ def test_pipeline_fetches_posts_and_runs_batch_extraction():
 
     assert source.calls == 1
     assert result.total == 2
+    assert len(result.events) == 1
+    assert result.events[0].event.title == "Лекция"
+    assert result.events[0].outcome_index == 0
     assert [outcome.post for outcome in result.outcomes] == posts
     assert [outcome.status for outcome in result.outcomes] == [
         ExtractionStatus.EXTRACTED,
@@ -134,6 +137,8 @@ def test_pipeline_can_load_previous_result_and_save_next_result(tmp_path):
 
     assert result.cached == 1
     assert loaded.cached == 1
+    assert len(loaded.events) == 1
+    assert loaded.events[0].post.external_id == "post-1"
     assert loaded.outcomes[0].post.external_id == "post-1"
 
 

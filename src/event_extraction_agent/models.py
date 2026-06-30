@@ -242,6 +242,22 @@ class ExtractionOutcome(BaseModel):
     raw_llm_metadata: dict[str, Any] | None = None
 
 
+class ExtractedEvent(BaseModel):
+    """One event extracted from a source post."""
+
+    event: Event
+    post: SourcePost
+    outcome_index: int
+    event_index: int
+    raw_llm_metadata: dict[str, Any] | None = None
+
+
+class DuplicateExtractedEvent(ExtractedEvent):
+    """Extracted event removed from the final event list as a duplicate."""
+
+    duplicate_of: int | None = None
+
+
 class BatchExtractionSettings(BaseModel):
     """Settings for deterministic sequential batch extraction."""
 
@@ -266,6 +282,8 @@ class BatchExtractionResult(BaseModel):
 
     settings: BatchExtractionSettings = Field(default_factory=BatchExtractionSettings)
     outcomes: list[ExtractionOutcome] = Field(default_factory=list)
+    events: list[ExtractedEvent] = Field(default_factory=list)
+    duplicate_events: list[DuplicateExtractedEvent] = Field(default_factory=list)
     total: int = 0
     extracted: int = 0
     skipped: int = 0
@@ -293,6 +311,8 @@ class BatchExtractionResult(BaseModel):
         outcomes: list[ExtractionOutcome],
         settings: BatchExtractionSettings | None = None,
         error_limit_reached: bool = False,
+        events: list[ExtractedEvent] | None = None,
+        duplicate_events: list[DuplicateExtractedEvent] | None = None,
     ) -> "BatchExtractionResult":
         extracted = _count_status(outcomes, ExtractionStatus.EXTRACTED)
         skipped = _count_status(outcomes, ExtractionStatus.SKIPPED)
@@ -302,6 +322,8 @@ class BatchExtractionResult(BaseModel):
         return cls(
             settings=settings or BatchExtractionSettings(),
             outcomes=outcomes,
+            events=events if events is not None else _flatten_extracted_events(outcomes),
+            duplicate_events=duplicate_events or [],
             total=len(outcomes),
             extracted=extracted,
             skipped=skipped,
@@ -316,3 +338,22 @@ class BatchExtractionResult(BaseModel):
 
 def _count_status(outcomes: list[ExtractionOutcome], status: ExtractionStatus) -> int:
     return sum(1 for outcome in outcomes if outcome.status == status)
+
+
+def _flatten_extracted_events(outcomes: list[ExtractionOutcome]) -> list[ExtractedEvent]:
+    items: list[ExtractedEvent] = []
+    for outcome_index, outcome in enumerate(outcomes):
+        if outcome.status != ExtractionStatus.EXTRACTED:
+            continue
+        events = outcome.events or ([outcome.event] if outcome.event is not None else [])
+        for event_index, event in enumerate(events):
+            items.append(
+                ExtractedEvent(
+                    event=event,
+                    post=outcome.post,
+                    outcome_index=outcome_index,
+                    event_index=event_index,
+                    raw_llm_metadata=outcome.raw_llm_metadata,
+                )
+            )
+    return items

@@ -29,13 +29,13 @@ def test_golden_eval_gold_shape_is_consistent():
         if status == "extracted":
             assert item["event"] is not None
             assert item["skip_reason"] is None
-            assert item["duplicate_keep"] is True
             if item.get("events") is not None:
                 assert item["events"]
                 assert item["events"][0] == item["event"]
         if status == "skipped":
             assert item["event"] is None
             assert item["skip_reason"]
+            assert item["skip_reason"] != "duplicate_event"
         if status == "invalid":
             assert item["event"] is None
             assert item["skip_reason"] is None
