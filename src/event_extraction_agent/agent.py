@@ -21,7 +21,6 @@ from event_extraction_agent.models import (
 )
 from event_extraction_agent.prompts import (
     ATTENDANCE_TYPE_VALUES,
-    EVENT_STATUS_VALUES,
     EVENT_TYPE_CLASSIFICATION_PROMPT,
     EVENT_TYPE_VALUES,
     INDUSTRY_VALUES,
@@ -711,13 +710,10 @@ def _repair_event_payload(
     if _is_missing_value(copied.get("price_text")):
         copied["price_text"] = "free"
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
-    _coerce_prompt_enum(copied, "event_status", EVENT_STATUS_VALUES)
     _filter_prompt_list(copied, "relevant_roles", ROLE_VALUES)
     _filter_prompt_list(copied, "industries", INDUSTRY_VALUES)
     if copied.get("attendance_type") == "unknown":
         copied["attendance_type"] = "OfflineEventAttendanceMode"
-    if copied.get("event_status") == "unknown":
-        copied["event_status"] = "EventScheduled"
     return copied
 
 
@@ -1197,7 +1193,6 @@ _EVENT_FIELDS = {
     "address",
     "event_type",
     "attendance_type",
-    "event_status",
     "language",
     "source_name",
     "source_url",

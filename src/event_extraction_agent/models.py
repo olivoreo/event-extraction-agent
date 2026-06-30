@@ -42,16 +42,6 @@ class AttendanceType(StrEnum):
     OTHER = "other"
 
 
-class EventStatus(StrEnum):
-    SCHEDULED = "EventScheduled"
-    CANCELLED = "EventCancelled"
-    MOVED_ONLINE = "EventMovedOnline"
-    POSTPONED = "EventPostponed"
-    RESCHEDULED = "EventRescheduled"
-    UNKNOWN = "unknown"
-    OTHER = "other"
-
-
 class ExtractionStatus(StrEnum):
     EXTRACTED = "extracted"
     SKIPPED = "skipped"
@@ -70,7 +60,7 @@ class ExtractionAgentConfig(BaseModel):
 
     main_client: Any | None = None
     refinement_client: Any | None = None
-    use_event_type_refinement: bool = True
+    use_event_type_refinement: bool = False
     current_datetime: str | None = None
     min_request_interval_seconds: float = 0.0
     max_retries: int = 0
@@ -99,7 +89,6 @@ class ExtractionAgentConfig(BaseModel):
 
 _EVENT_TYPE_ALIASES = {value.value.lower(): value for value in EventType}
 _ATTENDANCE_TYPE_ALIASES = {value.value.lower(): value for value in AttendanceType}
-_EVENT_STATUS_ALIASES = {value.value.lower(): value for value in EventStatus}
 
 
 def _normalize_required_category(value: Any, aliases: dict[str, StrEnum]) -> StrEnum:
@@ -122,10 +111,6 @@ def normalize_event_type(value: Any) -> EventType:
 
 def normalize_attendance_type(value: Any) -> AttendanceType:
     return _normalize_required_category(value, _ATTENDANCE_TYPE_ALIASES)  # type: ignore[return-value]
-
-
-def normalize_event_status(value: Any) -> EventStatus:
-    return _normalize_required_category(value, _EVENT_STATUS_ALIASES)  # type: ignore[return-value]
 
 
 class SourcePost(BaseModel):
@@ -184,7 +169,6 @@ class Event(BaseModel):
     address: str | None = None
     event_type: EventType = EventType.UNKNOWN
     attendance_type: AttendanceType = AttendanceType.UNKNOWN
-    event_status: EventStatus = EventStatus.SCHEDULED
     language: str
     source_name: str | None = None
     source_url: str | None = None
@@ -229,11 +213,6 @@ class Event(BaseModel):
     @classmethod
     def validate_attendance_type(cls, value: Any) -> AttendanceType:
         return normalize_attendance_type(value)
-
-    @field_validator("event_status", mode="before")
-    @classmethod
-    def validate_event_status(cls, value: Any) -> EventStatus:
-        return normalize_event_status(value)
 
     @field_validator("end_at")
     @classmethod

@@ -7,7 +7,6 @@ from event_extraction_agent import (
     AttendanceType,
     BatchExtractionResult,
     Event,
-    EventStatus,
     EventType,
     ExtractionOutcome,
     ExtractionStatus,
@@ -27,7 +26,6 @@ VALID_EVENT_DATA = {
     "address": None,
     "event_type": "EducationEvent",
     "attendance_type": "OfflineEventAttendanceMode",
-    "event_status": "EventScheduled",
     "language": "ru",
     "source_name": "VK",
     "source_url": "https://vk.com/example?w=wall-1_1",
@@ -61,7 +59,6 @@ def test_event_validates_contract_fields():
     assert event.start_at == datetime(2026, 6, 15, 19, 0, tzinfo=timezone(timedelta(hours=3)))
     assert event.event_type == EventType.EDUCATION
     assert event.attendance_type == AttendanceType.OFFLINE
-    assert event.event_status == EventStatus.SCHEDULED
 
 
 def test_event_requires_core_fields():

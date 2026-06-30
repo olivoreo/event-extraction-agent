@@ -157,7 +157,6 @@ def _event_payload() -> dict[str, object]:
         "address": None,
         "event_type": "EducationEvent",
         "attendance_type": "OfflineEventAttendanceMode",
-        "event_status": "EventScheduled",
         "language": "ru",
         "source_name": None,
         "source_url": None,
