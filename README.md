@@ -58,7 +58,7 @@ for outcome in result.outcomes:
         print(outcome.status, outcome.errors)
 ```
 
-Минимально в `ExtractionAgentConfig` нужно передать `main_client`. Уточнение типа события (`use_event_type_refinement`) по умолчанию выключено, чтобы не делать второй LLM-запрос на часть постов.
+Минимально в `ExtractionAgentConfig` нужно передать `main_client`. Уточнения `event_type` и `title`/`description` по умолчанию выключены, чтобы не делать дополнительные LLM-запросы без явного включения.
 
 ## Сохранение результата
 
@@ -149,7 +149,7 @@ config = ExtractionAgentConfig(
 )
 ```
 
-`refinement_client` нужен только если включен `use_event_type_refinement=True`. Если он не задан, refinement будет использовать `main_client`.
+`refinement_client` опционален и используется при включенных refinement-флагах. Если он не задан, refinement будет использовать `main_client`.
 
 Поддерживается любой LLM-клиент с методом:
 

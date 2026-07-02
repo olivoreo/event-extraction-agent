@@ -105,6 +105,7 @@ SYSTEM_PROMPT = """
 Даты: start_at/end_at в ISO без offset/Z. День+месяц без года бери из published_at; если дата раньше published_at, используй следующий год. Нет времени -> 00:00:00. Нет уверенной даты -> start_at=null. Не подменяй дату события дедлайном/розыгрышем/итогами. Для регистрации/заявок/голосования дедлайн без старта -> start_at=null, end_at=дедлайн; период "с X по Y" -> start_at=X, end_at=Y. end_at только при явном окончании этого же объекта. Длительность ("2 часа") не вычисляй. Последовательные дни можно одним периодом; непоследовательные даты - отдельные events.
 
 Поля: title строка для is_event=true; language для русского "ru"; description короткая; venue/address/city/audience только явно; timezone IANA если ясно из города/контекста, иначе "unknown"; attendance_type default OfflineEventAttendanceMode; price_text "free" если бесплатно/цена не указана, иначе кратко. Не возвращай source_name, source_url и raw_text.
+title — только название мероприятия без приписок и описательных деталей. Если название явно выделено кавычками/капсом/отдельной строкой, бери только выделенное название. Если явного названия нет, title — краткая суть события из текста. description — отдельное короткое описание формата, аудитории и содержания события, без повторения title как единственной информации.
 
 Категории выбирай только из разрешенных значений в пользовательском prompt. Для event_type выбери ближайший тип, не unknown. relevant_roles только ROLE_VALUES, industries только INDUSTRY_VALUES, skills короткие английские labels или null.
 Подсказки event_type: лекция/вебинар/мастер-класс/интенсив/курс -> EducationEvent/CourseInstance; конкурс/соревнование/финал/отбор -> CompetitionEvent; концерт -> MusicEvent; спектакль -> TheaterEvent; кино -> ScreeningEvent; выставка -> ExhibitionEvent; гастро/кулинария -> FoodEvent; хакатон -> Hackathon; деловая встреча/конференция -> BusinessEvent; детское -> ChildrensEvent; спорт -> SportsEvent.
@@ -159,6 +160,16 @@ SocialEvent используй только для общих социальны
 """.strip()
 
 
+TITLE_DESCRIPTION_REFINEMENT_PROMPT = """
+Ты исправляешь только title и description события по тексту поста.
+Верни только JSON без markdown и пояснений.
+title должен быть названием мероприятия, а не рекламной фразой, темой поста или чужим событием.
+Если название явно выделено кавычками/капсом/отдельной строкой, бери только выделенное название.
+Если явного названия нет, title — краткая суть события из текста.
+description — краткое описание формата, аудитории и содержания события; не дублируй один title без новой информации.
+""".strip()
+
+
 def build_event_type_classification_prompt(raw_text: str, draft: dict[str, Any] | None = None) -> str:
     return f"""
 Разрешенные event_type:
@@ -185,4 +196,17 @@ def build_event_type_classification_prompt(raw_text: str, draft: dict[str, Any] 
 
 Ответ:
 {{"event_type": "<one allowed event_type>"}}
+""".strip()
+
+
+def build_title_description_refinement_prompt(raw_text: str, draft: dict[str, Any] | None = None) -> str:
+    return f"""
+Черновик события:
+{json.dumps(draft or {}, ensure_ascii=False, indent=2)}
+
+Текст:
+{raw_text}
+
+Ответ:
+{{"title": "<event title>", "description": "<short event description or null>"}}
 """.strip()

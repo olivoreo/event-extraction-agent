@@ -61,6 +61,7 @@ class ExtractionAgentConfig(BaseModel):
     main_client: Any | None = None
     refinement_client: Any | None = None
     use_event_type_refinement: bool = False
+    use_title_description_refinement: bool = False
     current_datetime: str | None = None
     min_request_interval_seconds: float = 0.0
     max_retries: int = 0

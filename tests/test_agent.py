@@ -655,6 +655,55 @@ def test_event_type_refinement_uses_refinement_client():
     ]
 
 
+def test_title_description_refinement_fixes_unrelated_title():
+    main_client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-06-05T18:00:00+03:00", title="Концерт на набережной"),
+                    "description": "Концерт.",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        model="main-model",
+    )
+    refinement_client = FakeLLMClient(
+        json.dumps(
+            {
+                "title": "По щучьему велению",
+                "description": "Семейный спектакль по мотивам русской сказки.",
+            },
+            ensure_ascii=False,
+        ),
+        model="refinement-model",
+    )
+
+    outcome = ExtractionAgent(
+        llm_client=main_client,
+        refinement_llm_client=refinement_client,
+        config=ExtractionAgentConfig(use_title_description_refinement=True),
+    ).extract(
+        SourcePost(
+            text='5 июня в 18:00 состоится семейный спектакль "По щучьему велению" для детей и родителей.'
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.title == "По щучьему велению"
+    assert outcome.event.description == "Семейный спектакль по мотивам русской сказки."
+    assert len(refinement_client.calls) == 1
+    assert outcome.raw_llm_metadata is not None
+    assert outcome.raw_llm_metadata["title_description_refinement"] == "completed"
+    assert outcome.raw_llm_metadata["llm_attempts"] == [
+        {"stage": "main_extraction", "model": "main-model", "success": True},
+        {"stage": "title_description_refinement", "model": "refinement-model", "success": True},
+    ]
+
+
 def test_event_type_refinement_uses_config_refinement_client():
     main_client = FakeLLMClient(
         json.dumps(

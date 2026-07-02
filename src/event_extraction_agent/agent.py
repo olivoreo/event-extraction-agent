@@ -29,8 +29,10 @@ from event_extraction_agent.prompts import (
     ROLE_VALUES,
     SKIP_REASONS,
     SYSTEM_PROMPT,
+    TITLE_DESCRIPTION_REFINEMENT_PROMPT,
     build_event_type_classification_prompt,
     build_extraction_prompt,
+    build_title_description_refinement_prompt,
 )
 from event_extraction_agent.validator import ValidationIssue, validate_extraction_result
 
@@ -319,6 +321,7 @@ class ExtractionAgent:
         self.llm_client = llm_client or self.config.main_client
         if self.llm_client is None:
             raise ValueError("llm_client is required; pass it directly or set config.main_client")
+        self.title_description_refinement_llm_client = refinement_llm_client or self.config.refinement_client or self.llm_client
         if self.config.use_event_type_refinement:
             self.refinement_llm_client = refinement_llm_client or self.config.refinement_client or self.llm_client
         else:
@@ -427,6 +430,7 @@ class ExtractionAgent:
                 raw_text=raw_text,
                 published_at=published_at,
             )
+            event_payload = self._refine_title_description(event_payload, raw_text=raw_text)
             event_payload = self._refine_event_type(event_payload, raw_text=raw_text)
             event_payload = _with_source_metadata(
                 event_payload,
@@ -630,6 +634,48 @@ class ExtractionAgent:
         elif event_type not in EVENT_TYPE_VALUES:
             copied["event_type"] = "SocialEvent"
             self.last_metadata["event_type_refinement"] = "defaulted"
+        return copied
+
+    def _refine_title_description(self, event_payload: dict[str, Any], raw_text: str) -> dict[str, Any]:
+        copied = dict(event_payload)
+        if not self.config.use_title_description_refinement:
+            self.last_metadata["title_description_refinement"] = "disabled"
+            return copied
+        if self.title_description_refinement_llm_client is None:
+            self.last_metadata["title_description_refinement"] = "unavailable"
+            return copied
+        if _title_matches_raw_text(copied.get("title"), raw_text):
+            self.last_metadata["title_description_refinement"] = "not_needed"
+            return copied
+
+        client = self.title_description_refinement_llm_client
+        prompt = build_title_description_refinement_prompt(raw_text=raw_text, draft=copied)
+        try:
+            content = self._complete(client, TITLE_DESCRIPTION_REFINEMENT_PROMPT, prompt)
+            payload = _parse_llm_json(content)
+        except Exception as exc:
+            self._add_llm_attempt(
+                stage="title_description_refinement",
+                client=client,
+                success=False,
+                error=str(exc),
+            )
+            self.last_metadata["title_description_refine_error"] = str(exc)
+            self.last_metadata["title_description_refinement"] = "failed"
+            return copied
+        self._add_llm_attempt(stage="title_description_refinement", client=client, success=True)
+
+        title = payload.get("title")
+        if isinstance(title, str) and title.strip() and _title_matches_raw_text(title, raw_text):
+            copied["title"] = title.strip()
+            self.last_metadata["title_description_refined"] = True
+            self.last_metadata["title_description_refinement"] = "completed"
+        else:
+            self.last_metadata["title_description_refinement"] = "rejected"
+
+        description = payload.get("description")
+        if description is None or isinstance(description, str):
+            copied["description"] = description.strip() if isinstance(description, str) else None
         return copied
 
 
@@ -946,6 +992,16 @@ def _title_tokens(value: str) -> set[str]:
     tokens = set(re.findall(r"[a-zа-яё0-9]+", value.lower().replace("ё", "е"), re.IGNORECASE))
     significant = tokens - _DUPLICATE_TITLE_STOPWORDS
     return significant or tokens
+
+
+def _title_matches_raw_text(title: Any, raw_text: str) -> bool:
+    if not isinstance(title, str) or not title.strip():
+        return False
+    title_tokens = _title_tokens(title)
+    text_tokens = _title_tokens(raw_text)
+    if not title_tokens:
+        return False
+    return len(title_tokens & text_tokens) / len(title_tokens) >= 0.5
 
 
 def _event_dates_are_close(left: datetime | None, right: datetime | None) -> bool:
