@@ -142,6 +142,56 @@ def test_pipeline_can_load_previous_result_and_save_next_result(tmp_path):
     assert loaded.outcomes[0].post.external_id == "post-1"
 
 
+def test_pipeline_can_accumulate_existing_outcomes(tmp_path):
+    cached_post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
+    old_post = SourcePost(text="6 июня в 19:00 пройдет концерт.", external_id="post-2")
+    previous_result = BatchExtractionResult.from_outcomes(
+        [
+            _existing_outcome(cached_post, title="Лекция", start_at="2026-06-05T18:00:00+03:00"),
+            _existing_outcome(old_post, title="Концерт", start_at="2026-06-06T19:00:00+03:00"),
+        ]
+    )
+    previous_path = tmp_path / "previous.json"
+    next_path = tmp_path / "next.json"
+    previous_result.save_json(previous_path)
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload(),
+                        "title": "Встреча",
+                        "start_at": "2026-06-07T20:00:00+03:00",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = ExtractionPipeline(
+        source=FakeSource(
+            [
+                SourcePost(text="5 июня\nв 18:00 пройдет лекция.", external_id="post-1"),
+                SourcePost(text="7 июня в 20:00 пройдет встреча.", external_id="post-3"),
+            ]
+        ),
+        agent_config=ExtractionAgentConfig(main_client=client),
+        previous_result_path=previous_path,
+        save_result_path=next_path,
+        accumulate_existing_outcomes=True,
+    ).run()
+
+    loaded = BatchExtractionResult.load_json(next_path)
+
+    assert len(client.calls) == 1
+    assert result.total == 3
+    assert [outcome.post.external_id for outcome in loaded.outcomes] == ["post-1", "post-3", "post-2"]
+    assert {item.event.title for item in loaded.events} == {"Лекция", "Встреча", "Концерт"}
+
+
 def test_pipeline_rejects_invalid_source_return_shape():
     source = FakeSource(["not a SourcePost"])
     config = ExtractionAgentConfig(main_client=FakeLLMClient([]))
@@ -174,10 +224,22 @@ def _event_payload() -> dict[str, object]:
     }
 
 
-def _existing_outcome(post: SourcePost) -> ExtractionOutcome:
+def _existing_outcome(
+    post: SourcePost,
+    *,
+    title: str = "Лекция",
+    start_at: str = "2026-06-05T18:00:00+03:00",
+) -> ExtractionOutcome:
     return ExtractionOutcome(
         status=ExtractionStatus.EXTRACTED,
-        event=Event(**{**_event_payload(), "raw_text": post.raw_text_for_prompt()}),
+        event=Event(
+            **{
+                **_event_payload(),
+                "title": title,
+                "start_at": start_at,
+                "raw_text": post.raw_text_for_prompt(),
+            }
+        ),
         post=post,
         raw_llm_metadata={"model": "cached-test-model"},
     )

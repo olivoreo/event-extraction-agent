@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "event-extraction-agent"
-version = "1.2.1"
+version = "1.2.2"
 description = "Python library for extracting structured event data from text posts with LLM agents."
 readme = "README.md"
 requires-python = ">=3.11"
