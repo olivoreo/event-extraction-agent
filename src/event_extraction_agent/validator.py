@@ -41,6 +41,19 @@ def validate_extraction_result(payload: Any) -> ValidationResult:
     except ValidationError as error:
         return ValidationResult(is_valid=False, event=None, errors=_issues_from_pydantic(error))
 
+    if event.start_at is None and event.end_at is None:
+        return ValidationResult(
+            is_valid=False,
+            event=None,
+            errors=[
+                ValidationIssue(
+                    field="start_at",
+                    code="missing_event_date",
+                    message="event must have start_at or end_at",
+                )
+            ],
+        )
+
     return ValidationResult(is_valid=True, event=event, errors=[])
 
 

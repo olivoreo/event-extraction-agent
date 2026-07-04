@@ -161,7 +161,30 @@ def test_extract_returns_llm_error_for_malformed_json():
     assert outcome.errors[0].code == "llm_error"
 
 
-def test_extract_allows_event_without_start_at():
+def test_extract_allows_event_without_start_at_when_end_at_exists():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at=None),
+                    "end_at": "2026-06-20T00:00:00",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text="Скоро пройдет встреча."))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at is None
+    assert outcome.event.end_at is not None
+
+
+def test_extract_rejects_event_without_start_or_end_at():
     client = FakeLLMClient(
         json.dumps(
             {
@@ -175,9 +198,9 @@ def test_extract_allows_event_without_start_at():
 
     outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text="Скоро пройдет встреча."))
 
-    assert outcome.status == ExtractionStatus.EXTRACTED
-    assert outcome.event is not None
-    assert outcome.event.start_at is None
+    assert outcome.status == ExtractionStatus.INVALID
+    assert outcome.event is None
+    assert outcome.errors[0].code == "missing_event_date"
 
 
 def test_extract_repairs_start_at_from_russian_date_and_time():
@@ -491,6 +514,46 @@ def test_extract_strips_timezone_offset_from_llm_datetimes():
     assert outcome.event.end_at.isoformat() == "2026-06-19T21:00:00"
 
 
+def test_extract_retries_once_when_end_at_is_before_start_at():
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload(start_at="2026-06-05T18:00:00"),
+                        "end_at": "2026-06-01T18:00:00",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": _event_payload(start_at="2026-06-05T18:00:00"),
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text="5 июня в 18:00 пройдет встреча."))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is None
+    assert len(client.calls) == 2
+    assert "end_at не может быть раньше start_at" in client.calls[1][1]
+    assert outcome.raw_llm_metadata is not None
+    assert outcome.raw_llm_metadata["active_stage"] == "invalid_date_repair"
+    assert [attempt["stage"] for attempt in outcome.raw_llm_metadata["llm_attempts"]] == [
+        "main_extraction",
+        "invalid_date_repair",
+    ]
+
+
 def test_extract_overrides_giveaway_result_as_non_announcement():
     client = FakeLLMClient(_event_response("2026-06-26T19:00:00+03:00"))
 
@@ -581,7 +644,7 @@ def test_extract_skips_personal_film_story_when_llm_marks_it_non_announcement():
     assert len(client.calls) == 1
 
 
-def test_extract_keeps_announcement_with_guest_opinion_without_date():
+def test_extract_rejects_announcement_with_guest_opinion_without_date():
     client = FakeLLMClient(_event_response(None, title="Встреча с режиссером"))
 
     outcome = ExtractionAgent(llm_client=client).extract(
@@ -593,8 +656,9 @@ def test_extract_keeps_announcement_with_guest_opinion_without_date():
         )
     )
 
-    assert outcome.status == ExtractionStatus.EXTRACTED
-    assert outcome.event is not None
+    assert outcome.status == ExtractionStatus.INVALID
+    assert outcome.event is None
+    assert outcome.errors[0].code == "missing_event_date"
     assert len(client.calls) == 1
 
 
@@ -828,7 +892,10 @@ def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
                 {
                     "is_event": True,
                     "skip_reason": None,
-                    "event": _event_payload(start_at=None),
+                    "event": {
+                        **_event_payload(start_at=None),
+                        "end_at": "2026-06-20T00:00:00+03:00",
+                    },
                 },
                 ensure_ascii=False,
             ),
@@ -854,6 +921,7 @@ def test_extract_many_preserves_order_with_mixed_outcomes_and_duplicates():
     assert outcomes[2].errors[0].code == "not_event_announcement"
     assert outcomes[3].event is not None
     assert outcomes[3].event.start_at is None
+    assert outcomes[3].event.end_at is not None
     assert len(client.calls) == 3
 
 
@@ -1053,7 +1121,7 @@ def test_extract_batch_returns_summary_and_applies_error_limit():
     assert result.error_limit_reached is True
     assert [outcome.status for outcome in result.outcomes] == [ExtractionStatus.INVALID, ExtractionStatus.SKIPPED]
     assert result.outcomes[1].errors[0].code == "error_limit_reached"
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
 
 
 def test_extract_incremental_reuses_unchanged_outcomes_and_processes_changed_posts():

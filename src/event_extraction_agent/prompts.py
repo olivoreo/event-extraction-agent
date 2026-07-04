@@ -102,7 +102,7 @@ SYSTEM_PROMPT = """
 
 Если одно событие - заполни event, events=null/omit. Если несколько самостоятельных событий или непоследовательных повторов - event=null/omit, events отдельными объектами. Не склеивай события в один title.
 
-Даты: start_at/end_at в ISO без offset/Z. День+месяц без года бери из published_at; если дата раньше published_at, используй следующий год. Нет времени -> 00:00:00. Нет уверенной даты -> start_at=null. Не подменяй дату события дедлайном/розыгрышем/итогами. Для регистрации/заявок/голосования дедлайн без старта -> start_at=null, end_at=дедлайн; период "с X по Y" -> start_at=X, end_at=Y. end_at только при явном окончании этого же объекта. Длительность ("2 часа") не вычисляй. Последовательные дни можно одним периодом; непоследовательные даты - отдельные events.
+Даты: start_at/end_at в ISO без offset/Z. Если нет ни даты/времени начала, ни даты окончания/дедлайна, это не мероприятие -> is_event=false. День+месяц без года бери из published_at; если дата раньше published_at, используй следующий год. Нет времени -> 00:00:00. Нет уверенной даты начала -> start_at=null. Не подменяй дату события дедлайном/розыгрышем/итогами. Для регистрации/заявок/голосования дедлайн без старта -> start_at=null, end_at=дедлайн; период "с X по Y" -> start_at=X, end_at=Y. end_at только при явном окончании этого же объекта. Длительность ("2 часа") не вычисляй. Последовательные дни можно одним периодом; непоследовательные даты - отдельные events.
 
 Поля: title строка для is_event=true; language для русского "ru"; description короткая; venue/address/city/audience только явно; timezone IANA если ясно из города/контекста, иначе "unknown"; attendance_type default OfflineEventAttendanceMode; price_text "free" если бесплатно/цена не указана, иначе кратко. Не возвращай source_name, source_url и raw_text.
 title — только название мероприятия без приписок и описательных деталей. Если название явно выделено кавычками/капсом/отдельной строкой, бери только выделенное название. Если явного названия нет, title — краткая суть события из текста. description — отдельное короткое описание формата, аудитории и содержания события, без повторения title как единственной информации.
@@ -149,6 +149,32 @@ JSON shape:
 skip_reason values: {json.dumps(SKIP_REASONS, ensure_ascii=False, separators=(",", ":"))}
 metadata: {json.dumps(source_metadata, ensure_ascii=False, separators=(",", ":"))}
 raw_text: {raw_text}
+""".strip()
+
+
+def build_invalid_date_repair_prompt(
+    raw_text: str,
+    previous_errors: list[dict[str, str]],
+    source_name: str | None = None,
+    source_url: str | None = None,
+    published_at: str | None = None,
+    external_id: str | None = None,
+    current_datetime: str | None = None,
+) -> str:
+    return f"""
+Предыдущий ответ не прошел backend validation: {json.dumps(previous_errors, ensure_ascii=False, separators=(",", ":"))}
+Исправь только даты мероприятия. end_at не может быть раньше start_at.
+Если в тексте нет корректной даты окончания/дедлайна, верни end_at=null.
+Если после проверки нет ни start_at, ни end_at, верни is_event=false.
+
+{build_extraction_prompt(
+    raw_text=raw_text,
+    source_name=source_name,
+    source_url=source_url,
+    published_at=published_at,
+    external_id=external_id,
+    current_datetime=current_datetime,
+)}
 """.strip()
 
 

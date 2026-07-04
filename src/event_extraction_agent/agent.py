@@ -32,6 +32,7 @@ from event_extraction_agent.prompts import (
     TITLE_DESCRIPTION_REFINEMENT_PROMPT,
     build_event_type_classification_prompt,
     build_extraction_prompt,
+    build_invalid_date_repair_prompt,
     build_title_description_refinement_prompt,
 )
 from event_extraction_agent.validator import ValidationIssue, validate_extraction_result
@@ -343,6 +344,7 @@ class ExtractionAgent:
         client: LLMClient,
         stage: str,
         previous_metadata: dict[str, Any] | None = None,
+        repair_errors: list[ExtractionError] | None = None,
     ) -> ExtractionOutcome:
         current_datetime = self.current_datetime or _current_datetime()
         raw_text = post.raw_text_for_prompt()
@@ -364,13 +366,21 @@ class ExtractionAgent:
                 errors=[_error("root", skip_reason, "post is not an event announcement")],
                 metadata=self.last_metadata,
             )
-        prompt = build_extraction_prompt(
-            raw_text=raw_text,
-            source_name=post.source_name,
-            source_url=post.source_url,
-            published_at=post.published_at_for_prompt(),
-            external_id=post.external_id,
-            current_datetime=current_datetime,
+        prompt_kwargs = {
+            "raw_text": raw_text,
+            "source_name": post.source_name,
+            "source_url": post.source_url,
+            "published_at": post.published_at_for_prompt(),
+            "external_id": post.external_id,
+            "current_datetime": current_datetime,
+        }
+        prompt = (
+            build_extraction_prompt(**prompt_kwargs)
+            if repair_errors is None
+            else build_invalid_date_repair_prompt(
+                **prompt_kwargs,
+                previous_errors=[error.model_dump(mode="json") for error in repair_errors],
+            )
         )
         self.last_metadata = _metadata(
             client=client,
@@ -446,6 +456,14 @@ class ExtractionAgent:
                 validation_errors.extend(_issue_to_error(issue, prefix=prefix) for issue in validation.errors)
 
         if validation_errors:
+            if repair_errors is None and _should_retry_invalid_date_order(validation_errors):
+                return self._extract_once(
+                    post,
+                    client=self.llm_client,
+                    stage="invalid_date_repair",
+                    previous_metadata=self.last_metadata,
+                    repair_errors=validation_errors,
+                )
             return _outcome(
                 status=ExtractionStatus.INVALID,
                 post=post,
@@ -1234,6 +1252,15 @@ def _outcome(
 def _issue_to_error(issue: ValidationIssue, prefix: str | None = None) -> ExtractionError:
     field = f"{prefix}.{issue.field}" if prefix else issue.field
     return _error(field, issue.code, issue.message)
+
+
+def _should_retry_invalid_date_order(errors: list[ExtractionError]) -> bool:
+    return any(
+        error.code == "invalid_field"
+        and error.field.endswith("end_at")
+        and error.message == "end_at must not be before start_at"
+        for error in errors
+    )
 
 
 def _error(field: str, code: str, message: str) -> ExtractionError:
