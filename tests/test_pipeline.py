@@ -192,6 +192,78 @@ def test_pipeline_can_accumulate_existing_outcomes(tmp_path):
     assert {item.event.title for item in loaded.events} == {"Лекция", "Встреча", "Концерт"}
 
 
+def test_pipeline_prunes_missing_vk_outcomes_inside_current_window(tmp_path):
+    cached_post = SourcePost(
+        text="10 июля в 18:00 пройдет лекция.",
+        published_at="2026-07-10T12:00:00+03:00",
+        external_id="vk:wall-1_10",
+    )
+    missing_inside_window = SourcePost(
+        text="8 июля в 19:00 пройдет концерт.",
+        published_at="2026-07-08T12:00:00+03:00",
+        external_id="vk:wall-1_8",
+    )
+    old_outside_window = SourcePost(
+        text="4 июля в 20:00 пройдет встреча.",
+        published_at="2026-07-04T12:00:00+03:00",
+        external_id="vk:wall-1_4",
+    )
+    previous_result = BatchExtractionResult.from_outcomes(
+        [
+            _existing_outcome(cached_post, title="Лекция", start_at="2026-07-10T18:00:00+03:00"),
+            _existing_outcome(missing_inside_window, title="Концерт", start_at="2026-07-08T19:00:00+03:00"),
+            _existing_outcome(old_outside_window, title="Встреча", start_at="2026-07-04T20:00:00+03:00"),
+        ]
+    )
+    previous_path = tmp_path / "previous.json"
+    previous_result.save_json(previous_path)
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload(),
+                        "title": "Кинопоказ",
+                        "start_at": "2026-07-06T20:00:00+03:00",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = ExtractionPipeline(
+        source=FakeSource(
+            [
+                SourcePost(
+                    text="10 июля\nв 18:00 пройдет лекция.",
+                    published_at="2026-07-10T12:00:00+03:00",
+                    external_id="vk:wall-1_10",
+                ),
+                SourcePost(
+                    text="6 июля в 20:00 пройдет кинопоказ.",
+                    published_at="2026-07-06T12:00:00+03:00",
+                    external_id="vk:wall-1_6",
+                ),
+            ]
+        ),
+        agent_config=ExtractionAgentConfig(main_client=client),
+        previous_result_path=previous_path,
+        accumulate_existing_outcomes=True,
+    ).run()
+
+    assert len(client.calls) == 1
+    assert result.cached == 1
+    assert [outcome.post.external_id for outcome in result.outcomes] == [
+        "vk:wall-1_10",
+        "vk:wall-1_6",
+        "vk:wall-1_4",
+    ]
+    assert {item.event.title for item in result.events} == {"Лекция", "Кинопоказ", "Встреча"}
+
+
 def test_pipeline_rejects_invalid_source_return_shape():
     source = FakeSource(["not a SourcePost"])
     config = ExtractionAgentConfig(main_client=FakeLLMClient([]))

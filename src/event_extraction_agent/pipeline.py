@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from event_extraction_agent.agent import ExtractionAgent, _batch_result
@@ -122,8 +123,45 @@ def _accumulate_outcomes(
     existing_outcomes: list[ExtractionOutcome],
 ) -> list[ExtractionOutcome]:
     current_ids = {outcome.post.external_id for outcome in current_outcomes if outcome.post.external_id is not None}
+    vk_cutoffs = _vk_current_window_cutoffs(current_outcomes)
     return current_outcomes + [
         outcome
         for outcome in existing_outcomes
         if outcome.post.external_id is None or outcome.post.external_id not in current_ids
+        if not _is_missing_from_current_vk_window(outcome, vk_cutoffs)
     ]
+
+
+def _vk_current_window_cutoffs(outcomes: list[ExtractionOutcome]) -> dict[str, float]:
+    cutoffs: dict[str, float] = {}
+    for outcome in outcomes:
+        owner_id = _vk_owner_id(outcome.post.external_id)
+        published_at = _published_timestamp(outcome.post.published_at)
+        if owner_id is None or published_at is None:
+            continue
+        cutoffs[owner_id] = min(cutoffs.get(owner_id, published_at), published_at)
+    return cutoffs
+
+
+def _is_missing_from_current_vk_window(outcome: ExtractionOutcome, cutoffs: dict[str, float]) -> bool:
+    owner_id = _vk_owner_id(outcome.post.external_id)
+    published_at = _published_timestamp(outcome.post.published_at)
+    return owner_id in cutoffs and published_at is not None and published_at >= cutoffs[owner_id]
+
+
+def _vk_owner_id(external_id: str | None) -> str | None:
+    if external_id is None or not external_id.startswith("vk:wall"):
+        return None
+    owner_id = external_id.removeprefix("vk:wall").split("_", 1)[0]
+    return owner_id or None
+
+
+def _published_timestamp(value: datetime | str | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.timestamp()
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
