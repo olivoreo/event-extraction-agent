@@ -337,6 +337,42 @@ class BatchExtractionResult(BaseModel):
         )
 
 
+def drop_event(
+    result: BatchExtractionResult,
+    *,
+    outcome_index: int,
+    event_index: int = 0,
+) -> BatchExtractionResult:
+    """Return a copy of result with one extracted event removed from its outcome."""
+
+    outcome = result.outcomes[outcome_index]
+    events = list(outcome.events or ([outcome.event] if outcome.event is not None else []))
+    if event_index < 0 or event_index >= len(events):
+        raise IndexError("event_index out of range")
+
+    del events[event_index]
+    outcomes = list(result.outcomes)
+    if events:
+        outcomes[outcome_index] = outcome.model_copy(update={"event": events[0], "events": events})
+    else:
+        outcomes[outcome_index] = outcome.model_copy(
+            update={
+                "status": ExtractionStatus.SKIPPED,
+                "event": None,
+                "events": None,
+                "errors": [
+                    *outcome.errors,
+                    ExtractionError(field="event", code="dropped_by_user", message="event was dropped by user"),
+                ],
+            }
+        )
+    return BatchExtractionResult.from_outcomes(
+        outcomes,
+        settings=result.settings,
+        error_limit_reached=result.error_limit_reached,
+    )
+
+
 def _count_status(outcomes: list[ExtractionOutcome], status: ExtractionStatus) -> int:
     return sum(1 for outcome in outcomes if outcome.status == status)
 

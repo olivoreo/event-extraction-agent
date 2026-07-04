@@ -20,6 +20,7 @@ from event_extraction_agent.models import (
     ExtractionOutcome,
     ExtractionStatus,
     SourcePost,
+    drop_event,
 )
 from event_extraction_agent.pipeline import ExtractionPipeline
 from event_extraction_agent.sources import SourceAdapter
@@ -54,4 +55,5 @@ __all__ = [
     "VKFetchResult",
     "VKPostSource",
     "VKSource",
+    "drop_event",
 ]

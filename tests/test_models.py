@@ -11,6 +11,7 @@ from event_extraction_agent import (
     ExtractionOutcome,
     ExtractionStatus,
     SourcePost,
+    drop_event,
 )
 from event_extraction_agent.models import normalize_event_type
 
@@ -112,3 +113,49 @@ def test_batch_extraction_result_can_be_saved_and_loaded_for_incremental_process
     assert loaded == result
     assert loaded.outcomes[0].post.external_id == "vk:-1_1"
     assert loaded.outcomes[0].post.raw_text_for_prompt() == "15 июня в 19:00 пройдет лекция."
+
+
+def test_drop_event_removes_one_event_from_multi_event_outcome():
+    post = SourcePost(text="15 и 16 июня пройдут лекции.")
+    first_event = Event(**VALID_EVENT_DATA)
+    second_event = Event(**{**VALID_EVENT_DATA, "title": "Вторая лекция", "start_at": "2026-06-16T19:00:00+03:00"})
+    result = BatchExtractionResult.from_outcomes(
+        [
+            ExtractionOutcome(
+                status=ExtractionStatus.EXTRACTED,
+                event=None,
+                events=[first_event, second_event],
+                post=post,
+            )
+        ]
+    )
+
+    updated = drop_event(result, outcome_index=0, event_index=0)
+
+    assert updated.total == 1
+    assert updated.extracted == 1
+    assert updated.skipped == 0
+    assert updated.outcomes[0].event == second_event
+    assert updated.outcomes[0].events == [second_event]
+    assert [(item.outcome_index, item.event_index, item.event.title) for item in updated.events] == [
+        (0, 0, "Вторая лекция")
+    ]
+
+
+def test_drop_event_marks_outcome_skipped_when_last_event_is_removed():
+    post = SourcePost(text="15 июня в 19:00 пройдет лекция.")
+    event = Event(**VALID_EVENT_DATA)
+    result = BatchExtractionResult.from_outcomes(
+        [ExtractionOutcome(status=ExtractionStatus.EXTRACTED, event=event, post=post)]
+    )
+
+    updated = drop_event(result, outcome_index=0)
+
+    assert updated.total == 1
+    assert updated.extracted == 0
+    assert updated.skipped == 1
+    assert updated.events == []
+    assert updated.outcomes[0].status == ExtractionStatus.SKIPPED
+    assert updated.outcomes[0].event is None
+    assert updated.outcomes[0].events is None
+    assert updated.outcomes[0].errors[-1].code == "dropped_by_user"
