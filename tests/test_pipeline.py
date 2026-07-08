@@ -192,6 +192,146 @@ def test_pipeline_can_accumulate_existing_outcomes(tmp_path):
     assert {item.event.title for item in loaded.events} == {"Лекция", "Встреча", "Концерт"}
 
 
+def test_pipeline_accumulation_deduplicates_semantic_events_and_keeps_fresh_post(tmp_path):
+    old_post = SourcePost(
+        text="8 июля в 19:00 пройдет мастер-класс Живая картина в Зале Амфитеатра.",
+        raw_text="8 июля в 19:00 пройдет мастер-класс Живая картина в Зале Амфитеатра.",
+        source_url="https://vk.com/wall-45883617_23049",
+        published_at="2026-07-07T12:00:00+03:00",
+        external_id="vk:wall-45883617_23049",
+    )
+    previous_result = BatchExtractionResult.from_outcomes(
+        [
+            ExtractionOutcome(
+                status=ExtractionStatus.EXTRACTED,
+                event=Event(
+                    **{
+                        **_event_payload(),
+                        "title": "Живая картина",
+                        "description": "Мастер-класс по живописи на спилах натурального дерева",
+                        "start_at": "2026-07-08T19:00:00+03:00",
+                        "venue_name": "Зал Амфитеатра",
+                        "event_type": "EducationEvent",
+                        "industries": ["PerformingArts", "Art"],
+                        "raw_text": old_post.raw_text_for_prompt(),
+                    }
+                ),
+                post=old_post,
+            )
+        ]
+    )
+    previous_path = tmp_path / "previous.json"
+    previous_result.save_json(previous_path)
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload(),
+                        "title": "Живая Картина",
+                        "description": "Авторский мастер-класс по созданию уникальной живой картины",
+                        "start_at": "2026-07-08T19:00:00+03:00",
+                        "venue_name": "Амфитеатр",
+                        "event_type": "EducationEvent",
+                        "industries": ["Art", "PerformingArts"],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = ExtractionPipeline(
+        source=FakeSource(
+            [
+                SourcePost(
+                    text="8 июля в 19:00 пройдет авторский мастер-класс Живая Картина в Амфитеатре.",
+                    source_url="https://vk.com/wall-45883617_23071",
+                    published_at="2026-07-08T12:00:00+03:00",
+                    external_id="vk:wall-45883617_23071",
+                )
+            ]
+        ),
+        agent_config=ExtractionAgentConfig(main_client=client),
+        previous_result_path=previous_path,
+        accumulate_existing_outcomes=True,
+    ).run()
+
+    assert len(result.events) == 1
+    assert result.events[0].post.source_url == "https://vk.com/wall-45883617_23071"
+    assert len(result.duplicate_events) == 1
+    assert result.duplicate_events[0].post.source_url == "https://vk.com/wall-45883617_23049"
+
+
+def test_pipeline_accumulation_keeps_current_duplicate_when_publish_dates_are_missing(tmp_path):
+    old_post = SourcePost(
+        text="8 июля в 19:00 пройдет мастер-класс Живая картина.",
+        source_url="https://vk.com/wall-45883617_23049",
+        external_id="vk:wall-45883617_23049",
+    )
+    previous_result = BatchExtractionResult.from_outcomes(
+        [
+            ExtractionOutcome(
+                status=ExtractionStatus.EXTRACTED,
+                event=Event(
+                    **{
+                        **_event_payload(),
+                        "title": "Живая картина",
+                        "description": "Мастер-класс по живописи",
+                        "start_at": "2026-07-08T19:00:00+03:00",
+                        "event_type": "EducationEvent",
+                        "industries": ["Art"],
+                        "raw_text": old_post.raw_text_for_prompt(),
+                    }
+                ),
+                post=old_post,
+            )
+        ]
+    )
+    previous_path = tmp_path / "previous.json"
+    previous_result.save_json(previous_path)
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload(),
+                        "title": "Живая Картина",
+                        "description": "Авторский мастер-класс по живописи",
+                        "start_at": "2026-07-08T19:00:00+03:00",
+                        "event_type": "EducationEvent",
+                        "industries": ["Art"],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    result = ExtractionPipeline(
+        source=FakeSource(
+            [
+                SourcePost(
+                    text="8 июля в 19:00 пройдет авторский мастер-класс Живая Картина.",
+                    source_url="https://vk.com/wall-45883617_23071",
+                    external_id="vk:wall-45883617_23071",
+                )
+            ]
+        ),
+        agent_config=ExtractionAgentConfig(main_client=client),
+        previous_result_path=previous_path,
+        accumulate_existing_outcomes=True,
+    ).run()
+
+    assert len(result.events) == 1
+    assert result.events[0].post.source_url == "https://vk.com/wall-45883617_23071"
+    assert result.duplicate_events[0].post.source_url == "https://vk.com/wall-45883617_23049"
+
+
 def test_pipeline_prunes_missing_vk_outcomes_inside_current_window(tmp_path):
     cached_post = SourcePost(
         text="10 июля в 18:00 пройдет лекция.",

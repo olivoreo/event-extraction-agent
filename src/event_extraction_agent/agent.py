@@ -966,7 +966,7 @@ def _deduplicate_extracted_events(
     for group in groups:
         if len(group) < 2:
             continue
-        keep_index = max(group, key=lambda index: (_published_at_sort_key(events[index].post), index))
+        keep_index = _duplicate_group_keep_index(group, events)
         for index in group:
             if index != keep_index:
                 duplicate_indices.add(index)
@@ -979,8 +979,16 @@ def _deduplicate_extracted_events(
     return [event for index, event in enumerate(events) if index not in duplicate_indices], duplicate_events
 
 
+def _duplicate_group_keep_index(group: list[int], events: list[ExtractedEvent]) -> int:
+    with_dates = [index for index in group if _published_at_sort_key(events[index].post) != float("-inf")]
+    if with_dates:
+        return max(with_dates, key=lambda index: (_published_at_sort_key(events[index].post), index))
+    return min(group)
+
+
 def _events_are_duplicates(left: ExtractedEvent, right: ExtractedEvent) -> bool:
     title_score = _title_containment(left.event.title, right.event.title)
+    description_score = _text_containment(left.event.description, right.event.description)
     if title_score < 0.65:
         return False
     dates_match = _event_dates_are_close(left.event.start_at, right.event.start_at)
@@ -992,15 +1000,28 @@ def _events_are_duplicates(left: ExtractedEvent, right: ExtractedEvent) -> bool:
         )
     if not dates_match:
         return False
-    return _locations_are_compatible(left.event.city, right.event.city) and _locations_are_compatible(
-        left.event.venue_name,
-        right.event.venue_name,
-    )
+    if not _event_types_are_compatible(left.event.event_type, right.event.event_type):
+        return False
+    if not _industries_are_compatible(left.event.industries, right.event.industries):
+        return False
+    if title_score < 0.8 and left.event.description and right.event.description and description_score < 0.2:
+        return False
+    return True
 
 
 def _title_containment(left: str, right: str) -> float:
     left_tokens = _title_tokens(left)
     right_tokens = _title_tokens(right)
+    return _token_containment(left_tokens, right_tokens)
+
+
+def _text_containment(left: str | None, right: str | None) -> float:
+    left_tokens = _title_tokens(left or "")
+    right_tokens = _title_tokens(right or "")
+    return _token_containment(left_tokens, right_tokens)
+
+
+def _token_containment(left_tokens: set[str], right_tokens: set[str]) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
@@ -1055,18 +1076,17 @@ def _parse_datetime_value(value: Any) -> datetime | None:
         return None
 
 
-def _locations_are_compatible(left: str | None, right: str | None) -> bool:
-    left_tokens = _location_tokens(left)
-    right_tokens = _location_tokens(right)
-    if not left_tokens or not right_tokens:
+def _event_types_are_compatible(left: Any, right: Any) -> bool:
+    weak = {"unknown", "other"}
+    left_value = getattr(left, "value", left)
+    right_value = getattr(right, "value", right)
+    return left_value in weak or right_value in weak or left_value == right_value
+
+
+def _industries_are_compatible(left: list[str] | None, right: list[str] | None) -> bool:
+    if not left or not right:
         return True
-    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens)) >= 0.5
-
-
-def _location_tokens(value: str | None) -> set[str]:
-    if not value:
-        return set()
-    return set(re.findall(r"[a-zа-яё0-9]+", value.lower().replace("ё", "е"), re.IGNORECASE))
+    return bool(set(left) & set(right))
 
 
 def _published_at_sort_key(post: SourcePost) -> float:

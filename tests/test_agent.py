@@ -971,6 +971,59 @@ def test_extract_batch_deduplicates_events_and_keeps_latest_post_event():
     assert [event.duplicate_of for event in result.duplicate_events] == [2, 2]
 
 
+def test_extract_batch_deduplicates_events_by_title_categories_description_and_keeps_latest():
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload("2026-07-08T19:00:00", title="Живая картина", venue_name="Зал Амфитеатра"),
+                        "description": "Мастер-класс по живописи на спилах натурального дерева",
+                        "event_type": "EducationEvent",
+                        "industries": ["PerformingArts", "Art"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "is_event": True,
+                    "skip_reason": None,
+                    "event": {
+                        **_event_payload("2026-07-08T19:00:00", title="Живая Картина", venue_name="Амфитеатр"),
+                        "description": "Авторский мастер-класс по созданию уникальной живой картины",
+                        "event_type": "EducationEvent",
+                        "industries": ["Art", "PerformingArts"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(
+                text="8 июля в 19:00 пройдет мастер-класс Живая картина в Зале Амфитеатра.",
+                source_url="https://vk.com/wall-45883617_23049",
+                published_at="2026-07-07T12:00:00+03:00",
+            ),
+            SourcePost(
+                text="8 июля в 19:00 пройдет авторский мастер-класс Живая Картина в Амфитеатре.",
+                source_url="https://vk.com/wall-45883617_23071",
+                published_at="2026-07-08T12:00:00+03:00",
+            ),
+        ]
+    )
+
+    assert len(result.events) == 1
+    assert result.events[0].post.source_url == "https://vk.com/wall-45883617_23071"
+    assert len(result.duplicate_events) == 1
+    assert result.duplicate_events[0].post.source_url == "https://vk.com/wall-45883617_23049"
+
+
 def test_extract_batch_deduplicates_events_with_shared_deadline_even_if_start_dates_differ():
     client = FakeLLMClient(
         [
