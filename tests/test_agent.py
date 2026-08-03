@@ -7,6 +7,7 @@ from event_extraction_agent import (
     ExtractionAgent,
     ExtractionAgentConfig,
     ExtractionStatus,
+    GroqDailyRateLimitError,
     SourcePost,
 )
 from event_extraction_agent.prompts import SYSTEM_PROMPT, build_extraction_prompt
@@ -159,6 +160,19 @@ def test_extract_returns_llm_error_for_malformed_json():
     assert outcome.status == ExtractionStatus.LLM_ERROR
     assert outcome.event is None
     assert outcome.errors[0].code == "llm_error"
+
+
+def test_extract_marks_daily_groq_limit_without_agent_retries():
+    client = FakeLLMClient(GroqDailyRateLimitError("HTTP 429: tokens per day (TPD) exhausted"))
+
+    outcome = ExtractionAgent(
+        llm_client=client,
+        config=ExtractionAgentConfig(max_retries=3),
+    ).extract(SourcePost(text=RAW_TEXT))
+
+    assert outcome.status == ExtractionStatus.LLM_ERROR
+    assert outcome.errors[0].code == "daily_rate_limit_exceeded"
+    assert len(client.calls) == 1
 
 
 def test_extract_allows_event_without_start_at_when_end_at_exists():

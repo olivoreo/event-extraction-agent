@@ -4,7 +4,7 @@ import urllib.error
 
 import pytest
 
-from event_extraction_agent import GroqChatClient, OllamaChatClient
+from event_extraction_agent import GroqChatClient, GroqDailyRateLimitError, OllamaChatClient
 
 
 class FakeResponse:
@@ -84,3 +84,105 @@ def test_groq_client_reports_http_errors(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Groq request failed"):
         GroqChatClient(api_key="secret", max_retries=0).complete("system", "user")
+
+
+@pytest.mark.parametrize("limit_name", ["RPM", "TPM", "ITPM", "OTPM"])
+def test_groq_client_waits_for_minute_limits_without_spending_retries(monkeypatch, limit_name):
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            message = f"Rate limit reached on tokens per minute ({limit_name}). Please try again in 1s."
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs={"Retry-After": "1"},
+                fp=io.BytesIO(json.dumps({"error": {"message": message}}).encode()),
+            )
+        return FakeResponse({"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("event_extraction_agent.agent.time_module.sleep", sleeps.append)
+
+    content = GroqChatClient(api_key="secret", max_retries=0).complete("system", "user")
+
+    assert content == '{"ok": true}'
+    assert calls == 2
+    assert sleeps == [1.25]
+
+
+@pytest.mark.parametrize("limit_name", ["RPD", "TPD"])
+def test_groq_client_reports_daily_limits_without_waiting(monkeypatch, limit_name):
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        message = f"Rate limit reached on tokens per day ({limit_name})."
+        raise urllib.error.HTTPError(
+            request.full_url,
+            429,
+            "Too Many Requests",
+            hdrs={"Retry-After": "3600"},
+            fp=io.BytesIO(json.dumps({"error": {"message": message}}).encode()),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("event_extraction_agent.agent.time_module.sleep", sleeps.append)
+
+    with pytest.raises(GroqDailyRateLimitError, match=limit_name):
+        GroqChatClient(api_key="secret", max_retries=3).complete("system", "user")
+
+    assert sleeps == []
+
+
+def test_groq_client_uses_token_reset_when_retry_after_is_missing(monkeypatch):
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs={"x-ratelimit-reset-tokens": "2m3.5s"},
+                fp=io.BytesIO(b"{}"),
+            )
+        return FakeResponse({"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("event_extraction_agent.agent.time_module.sleep", sleeps.append)
+
+    GroqChatClient(api_key="secret", max_retries=0).complete("system", "user")
+
+    assert sleeps == [123.75]
+
+
+def test_groq_client_uses_safe_fallback_for_unknown_429(monkeypatch):
+    calls = 0
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs={},
+                fp=io.BytesIO(b"{}"),
+            )
+        return FakeResponse({"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("event_extraction_agent.agent.time_module.sleep", sleeps.append)
+
+    GroqChatClient(api_key="secret", max_retries=0).complete("system", "user")
+
+    assert sleeps == [60.25]

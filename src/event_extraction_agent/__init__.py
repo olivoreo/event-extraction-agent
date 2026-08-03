@@ -3,6 +3,7 @@
 from event_extraction_agent.agent import (
     ExtractionAgent,
     GroqChatClient,
+    GroqDailyRateLimitError,
     LLMClient,
     OllamaChatClient,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "ExtractionStatus",
     "ExtractionPipeline",
     "GroqChatClient",
+    "GroqDailyRateLimitError",
     "LLMClient",
     "OllamaChatClient",
     "SourceAdapter",

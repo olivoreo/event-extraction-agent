@@ -7,6 +7,7 @@ import time as time_module
 import urllib.error
 import urllib.request
 from datetime import date, datetime, time, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 
 from event_extraction_agent.models import (
@@ -42,6 +43,8 @@ DEFAULT_OLLAMA_MODEL = "qwen2.5:3b"
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MAIN_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 DEFAULT_GROQ_MAX_RETRIES = 3
+GROQ_RATE_LIMIT_BUFFER_SECONDS = 0.25
+GROQ_RATE_LIMIT_FALLBACK_SECONDS = 60.0
 
 _MONTHS = {
     "января": 1,
@@ -159,6 +162,10 @@ class LLMClient(Protocol):
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         """Return model content as text."""
+
+
+class GroqDailyRateLimitError(RuntimeError):
+    """Raised when Groq's requests-per-day or tokens-per-day quota is exhausted."""
 
 
 class OllamaChatClient:
@@ -287,25 +294,27 @@ class GroqChatClient:
             raise RuntimeError("Groq response does not contain choices[0].message.content") from exc
 
     def _send_with_retries(self, request: urllib.request.Request) -> str:
-        last_error: urllib.error.HTTPError | None = None
-        for attempt in range(self.max_retries + 1):
+        retries = 0
+        while True:
             if self.rate_limiter is not None:
                 self.rate_limiter.wait()
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                     return response.read().decode("utf-8")
             except urllib.error.HTTPError as exc:
-                if not _is_retryable_http_error(exc) or attempt >= self.max_retries:
-                    error_body = exc.read().decode("utf-8", errors="replace").strip()
-                    detail = f" HTTP {exc.code}: {error_body}" if error_body else f" HTTP {exc.code}"
-                    raise RuntimeError(f"Groq request failed:{detail}") from exc
-                last_error = exc
-                _sleep_before_retry(exc, attempt)
+                error_body = exc.read().decode("utf-8", errors="replace").strip()
+                if exc.code == 429:
+                    if _is_daily_groq_rate_limit(exc, error_body):
+                        raise GroqDailyRateLimitError(_groq_http_error_detail(exc, error_body)) from exc
+                    time_module.sleep(_groq_minute_rate_limit_delay(exc, error_body))
+                    continue
+                if 500 <= exc.code <= 599 and retries < self.max_retries:
+                    _sleep_before_retry(exc, retries)
+                    retries += 1
+                    continue
+                raise RuntimeError(f"Groq request failed:{_groq_http_error_detail(exc, error_body)}") from exc
             except urllib.error.URLError as exc:
                 raise RuntimeError(f"Groq request failed: {exc}") from exc
-        if last_error is not None:
-            raise RuntimeError(f"Groq request failed: HTTP {last_error.code}") from last_error
-        raise RuntimeError("Groq request failed")
 
 
 class ExtractionAgent:
@@ -336,7 +345,15 @@ class ExtractionAgent:
         self.last_metadata: dict[str, Any] = {}
 
     def extract(self, post: SourcePost) -> ExtractionOutcome:
-        return self._extract_once(post, client=self.llm_client, stage="main_extraction")
+        try:
+            return self._extract_once(post, client=self.llm_client, stage="main_extraction")
+        except GroqDailyRateLimitError as exc:
+            return _outcome(
+                status=ExtractionStatus.LLM_ERROR,
+                post=post,
+                errors=[_error("llm", "daily_rate_limit_exceeded", str(exc))],
+                metadata=self.last_metadata,
+            )
 
     def _extract_once(
         self,
@@ -401,7 +418,13 @@ class ExtractionAgent:
             return _outcome(
                 status=ExtractionStatus.LLM_ERROR,
                 post=post,
-                errors=[_error("llm", "llm_error", str(exc))],
+                errors=[
+                    _error(
+                        "llm",
+                        "daily_rate_limit_exceeded" if isinstance(exc, GroqDailyRateLimitError) else "llm_error",
+                        str(exc),
+                    )
+                ],
                 metadata=self.last_metadata,
         )
         self._add_llm_attempt(stage=stage, client=client, success=True)
@@ -489,6 +512,8 @@ class ExtractionAgent:
                 return client.complete(system_prompt, user_prompt)
             except Exception as exc:
                 last_error = exc
+                if isinstance(exc, GroqDailyRateLimitError):
+                    raise
                 if attempt >= self.config.max_retries:
                     raise
         assert last_error is not None
@@ -639,6 +664,8 @@ class ExtractionAgent:
                 error=str(exc),
             )
             self.last_metadata["event_type_refine_error"] = str(exc)
+            if isinstance(exc, GroqDailyRateLimitError):
+                raise
             if event_type not in EVENT_TYPE_VALUES:
                 copied["event_type"] = "SocialEvent"
             return copied
@@ -680,6 +707,8 @@ class ExtractionAgent:
             )
             self.last_metadata["title_description_refine_error"] = str(exc)
             self.last_metadata["title_description_refinement"] = "failed"
+            if isinstance(exc, GroqDailyRateLimitError):
+                raise
             return copied
         self._add_llm_attempt(stage="title_description_refinement", client=client, success=True)
 
@@ -1195,8 +1224,59 @@ def _filter_prompt_list(payload: dict[str, Any], field: str, allowed_values: tup
     payload[field] = filtered or None
 
 
-def _is_retryable_http_error(exc: urllib.error.HTTPError) -> bool:
-    return exc.code == 429 or 500 <= exc.code <= 599
+def _groq_http_error_detail(exc: urllib.error.HTTPError, error_body: str) -> str:
+    return f" HTTP {exc.code}: {error_body}" if error_body else f" HTTP {exc.code}"
+
+
+def _is_daily_groq_rate_limit(exc: urllib.error.HTTPError, error_body: str) -> bool:
+    if re.search(r"\b(?:RPD|TPD)\b|(?:requests|tokens)\s+per\s+day", error_body, re.IGNORECASE):
+        return True
+    remaining_requests = exc.headers.get("x-ratelimit-remaining-requests") if exc.headers is not None else None
+    try:
+        return remaining_requests is not None and float(remaining_requests) <= 0
+    except ValueError:
+        return False
+
+
+def _groq_minute_rate_limit_delay(exc: urllib.error.HTTPError, error_body: str) -> float:
+    headers = exc.headers
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    delay = _retry_after_seconds(retry_after)
+    if delay is None and headers is not None:
+        delay = _parse_groq_duration(headers.get("x-ratelimit-reset-tokens"))
+    if delay is None:
+        match = re.search(
+            r"try\s+again\s+in\s+((?:\d+(?:\.\d+)?\s*(?:ms|s|m|h)\s*)+)",
+            error_body,
+            re.IGNORECASE,
+        )
+        delay = _parse_groq_duration(match.group(1)) if match else None
+    return max(0.0, delay if delay is not None else GROQ_RATE_LIMIT_FALLBACK_SECONDS) + GROQ_RATE_LIMIT_BUFFER_SECONDS
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _parse_groq_duration(value: str | None) -> float | None:
+    if not value:
+        return None
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    parts = re.findall(r"(\d+(?:\.\d+)?)\s*(ms|s|m|h)", value, re.IGNORECASE)
+    if not parts:
+        return None
+    return sum(float(amount) * units[unit.lower()] for amount, unit in parts)
 
 
 def _sleep_before_retry(exc: urllib.error.HTTPError, attempt: int) -> None:

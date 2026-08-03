@@ -179,6 +179,15 @@ client = GroqChatClient(
 
 `max_retries` в `ExtractionAgentConfig` повторяет весь `client.complete(...)`. Обычно достаточно оставить его `0` и использовать retry клиента.
 
+### Rate limits Groq (1.2.5)
+
+`GroqChatClient` различает минутные и суточные HTTP `429` по типу лимита в ответе Groq:
+
+- `RPM`, `TPM`, `ITPM`, `OTPM`: клиент ждет `Retry-After` с запасом `0.25` секунды и повторяет тот же запрос до успеха. Если заголовка нет, используются `x-ratelimit-reset-tokens`, время из текста ошибки или безопасная пауза `60` секунд. Эти повторы не расходуют `max_retries` клиента или агента и не создают `llm_error`, поэтому batch продолжает обработку с текущего поста;
+- `RPD`, `TPD`: клиент не ждет суточного сброса. Пост получает статус `llm_error` и код ошибки `daily_rate_limit_exceeded`; incremental-режим повторит его при следующем запуске по обычной логике `retry_llm_errors=True`.
+
+`GROQ_MAX_RETRIES` теперь относится только к временным HTTP `5xx`. Формат и назначение заголовков описаны в [Groq Rate Limits](https://console.groq.com/docs/rate-limits); общий формат ошибок — в [Groq API Error Codes](https://console.groq.com/docs/errors).
+
 ## Запуск из `.env`
 
 Скрипты из `scripts/` читают `.sandbox/.env`. Основные параметры:
@@ -194,7 +203,7 @@ USE_EVENT_TYPE_REFINEMENT=false
 - `REQUEST_TIMEOUT_SECONDS` передается в `OllamaChatClient`/`GroqChatClient` как timeout одного HTTP-запроса.
 - `MIN_REQUEST_INTERVAL_SECONDS` задает минимальную паузу между LLM-вызовами агента.
 - `MAX_RETRIES` повторяет весь вызов агента после ошибки клиента.
-- `GROQ_MAX_RETRIES` повторяет HTTP-запросы Groq-клиента на `429`/`5xx`.
+- `GROQ_MAX_RETRIES` ограничивает повторы Groq-клиента на HTTP `5xx`; минутные `429` повторяются до успеха отдельно.
 - `USE_EVENT_TYPE_REFINEMENT=false` экономит токены и запросы; включайте только если нужно дополнительно уточнять `event_type`.
 
 ## Что возвращает pipeline
