@@ -368,14 +368,14 @@ class VKSource:
         return VKFetchResult(posts=posts, errors=errors)
 
     def _fetch_source_posts(self, source: VKPostSource) -> list[SourcePost]:
-        remaining = self.posts_per_source_limit
         current_offset = self.offset
         posts: list[SourcePost] = []
 
-        while remaining > 0:
+        while len(posts) < self.posts_per_source_limit:
+            requested_count = min(self.batch_size, self.posts_per_source_limit - len(posts))
             response = self.api_client.get_wall(
                 source,
-                count=min(self.batch_size, remaining),
+                count=requested_count,
                 offset=current_offset,
                 wall_filter=self.wall_filter,
                 extended=True,
@@ -391,11 +391,12 @@ class VKSource:
                 post = _to_source_post(item, source, sources_by_owner_id)
                 if post is not None:
                     posts.append(post)
+                    if len(posts) >= self.posts_per_source_limit:
+                        break
 
             fetched_count = len(items)
             current_offset += fetched_count
-            remaining -= fetched_count
-            if fetched_count < self.batch_size:
+            if fetched_count < requested_count:
                 break
 
         return posts

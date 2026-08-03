@@ -36,6 +36,9 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
 
     def fake_urlopen(request, timeout):
         captured.append((request.full_url, timeout))
+        query = parse_qs(urlparse(request.full_url).query)
+        if query.get("offset") == ["2"]:
+            return FakeResponse({"response": {"items": []}})
         return FakeResponse(
             {
                 "response": {
@@ -96,6 +99,34 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
     assert query["count"] == ["2"]
     assert query["filter"] == ["owner"]
     assert query["extended"] == ["1"]
+
+
+def test_vk_source_fetches_more_raw_items_to_fill_text_post_limit(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        requests.append((query["count"][0], query["offset"][0]))
+        if query["offset"] == ["0"]:
+            items = [
+                {"id": 1, "owner_id": -123, "text": "Первый текстовый пост"},
+                {"id": 2, "owner_id": -123, "text": "", "attachments": [{"type": "photo"}]},
+            ]
+        else:
+            items = [{"id": 3, "owner_id": -123, "text": "Второй текстовый пост"}]
+        return FakeResponse({"response": {"items": items}})
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    posts = VKSource(
+        access_token="secret",
+        sources=[-123],
+        posts_per_source_limit=2,
+        rate_limit_per_second=None,
+    ).fetch_posts()
+
+    assert requests == [("2", "0"), ("1", "2")]
+    assert [post.external_id for post in posts] == ["vk:wall-123_1", "vk:wall-123_3"]
 
 
 def test_vk_source_fetches_multiple_sources(monkeypatch):
