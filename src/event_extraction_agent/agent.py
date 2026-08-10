@@ -689,10 +689,6 @@ class ExtractionAgent:
         if self.title_description_refinement_llm_client is None:
             self.last_metadata["title_description_refinement"] = "unavailable"
             return copied
-        if _title_matches_raw_text(copied.get("title"), raw_text):
-            self.last_metadata["title_description_refinement"] = "not_needed"
-            return copied
-
         client = self.title_description_refinement_llm_client
         prompt = build_title_description_refinement_prompt(raw_text=raw_text, draft=copied)
         try:
@@ -800,6 +796,13 @@ def _repair_event_payload(
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
     _filter_prompt_list(copied, "relevant_roles", ROLE_VALUES)
     _filter_prompt_list(copied, "industries", INDUSTRY_VALUES)
+    skills = copied.get("skills")
+    if skills is not None:
+        copied["skills"] = (
+            [item.strip() for item in skills if isinstance(item, str) and item.strip()]
+            if isinstance(skills, list)
+            else None
+        )
     if copied.get("attendance_type") == "unknown":
         copied["attendance_type"] = "OfflineEventAttendanceMode"
     return copied

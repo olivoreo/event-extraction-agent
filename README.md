@@ -179,7 +179,7 @@ client = GroqChatClient(
 
 `max_retries` в `ExtractionAgentConfig` повторяет весь `client.complete(...)`. Обычно достаточно оставить его `0` и использовать retry клиента.
 
-### Rate limits Groq (1.2.5)
+### Rate limits Groq
 
 `GroqChatClient` различает минутные и суточные HTTP `429` по типу лимита в ответе Groq:
 
@@ -198,6 +198,8 @@ MIN_REQUEST_INTERVAL_SECONDS=0
 MAX_RETRIES=0
 GROQ_MAX_RETRIES=3
 USE_EVENT_TYPE_REFINEMENT=false
+USE_TITLE_DESCRIPTION_REFINEMENT=false
+GOLDEN_POST_LIMIT=3
 ```
 
 - `REQUEST_TIMEOUT_SECONDS` передается в `OllamaChatClient`/`GroqChatClient` как timeout одного HTTP-запроса.
@@ -205,6 +207,8 @@ USE_EVENT_TYPE_REFINEMENT=false
 - `MAX_RETRIES` повторяет весь вызов агента после ошибки клиента.
 - `GROQ_MAX_RETRIES` ограничивает повторы Groq-клиента на HTTP `5xx`; минутные `429` повторяются до успеха отдельно.
 - `USE_EVENT_TYPE_REFINEMENT=false` экономит токены и запросы; включайте только если нужно дополнительно уточнять `event_type`.
+- `USE_TITLE_DESCRIPTION_REFINEMENT=false` включает отдельную проверку `title` и полной сухой выжимки в `description` для каждого найденного события.
+- `GOLDEN_POST_LIMIT` ограничивает число первых постов в `scripts/run_golden_extraction.py`; без него обрабатывается весь golden-набор.
 
 ## Что возвращает pipeline
 

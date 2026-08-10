@@ -110,6 +110,11 @@ def test_extraction_prompt_omits_locally_injected_output_fields():
     assert '"source_url"' not in schema
     assert '"event_status"' not in schema
     assert "Личные истории, мнения, интервью или планы автора" in SYSTEM_PROMPT
+    assert "самодостаточная сухая выжимка" in SYSTEM_PROMPT
+    assert "ссылки для регистрации, покупки билетов" in SYSTEM_PROMPT
+    assert "только на русском языке" in SYSTEM_PROMPT
+    assert "их может быть несколько" in SYSTEM_PROMPT
+    assert "все и только подходящие способы участия" in SYSTEM_PROMPT
     assert "metadata:" in prompt
     assert "raw_text: 5 июня в 18:00 пройдет лекция." in prompt
 
@@ -160,6 +165,20 @@ def test_extract_returns_llm_error_for_malformed_json():
     assert outcome.status == ExtractionStatus.LLM_ERROR
     assert outcome.event is None
     assert outcome.errors[0].code == "llm_error"
+
+
+def test_extract_drops_skills_when_llm_returns_string_instead_of_list():
+    payload = _event_payload(start_at="2026-06-05T18:00:00+03:00")
+    payload["skills"] = "music"
+    client = FakeLLMClient(
+        json.dumps({"is_event": True, "skip_reason": None, "event": payload}, ensure_ascii=False)
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text=RAW_TEXT))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.skills is None
 
 
 def test_extract_marks_daily_groq_limit_without_agent_retries():
@@ -780,6 +799,45 @@ def test_title_description_refinement_fixes_unrelated_title():
         {"stage": "main_extraction", "model": "main-model", "success": True},
         {"stage": "title_description_refinement", "model": "refinement-model", "success": True},
     ]
+
+
+def test_title_description_refinement_runs_for_matching_title_and_improves_description():
+    main_client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-06-05T18:00:00+03:00", title="По щучьему велению"),
+                    "description": "Приходите на невероятный спектакль!",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    refinement_client = FakeLLMClient(
+        json.dumps(
+            {
+                "title": "По щучьему велению",
+                "description": "Семейный спектакль по мотивам русской сказки для детей и родителей.",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(
+        llm_client=main_client,
+        refinement_llm_client=refinement_client,
+        config=ExtractionAgentConfig(use_title_description_refinement=True),
+    ).extract(
+        SourcePost(
+            text='5 июня в 18:00 состоится семейный спектакль "По щучьему велению" для детей и родителей.'
+        )
+    )
+
+    assert outcome.event is not None
+    assert outcome.event.description == "Семейный спектакль по мотивам русской сказки для детей и родителей."
+    assert len(refinement_client.calls) == 1
 
 
 def test_event_type_refinement_uses_config_refinement_client():

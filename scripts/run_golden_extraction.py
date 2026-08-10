@@ -32,7 +32,11 @@ def main() -> None:
     gold_path = Path(env.get("GOLDEN_GOLD_PATH", DEFAULT_GOLD_PATH))
     output_path = Path(env.get("GOLDEN_OUTPUT_PATH", DEFAULT_OUTPUT_PATH))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    post_count = _source_post_count(source_path)
+    post_limit = int(env["GOLDEN_POST_LIMIT"]) if env.get("GOLDEN_POST_LIMIT") else None
+    if post_limit is not None and post_limit < 1:
+        raise ValueError("GOLDEN_POST_LIMIT must be positive")
+    source_post_count = _source_post_count(source_path)
+    post_count = min(source_post_count, post_limit) if post_limit is not None else source_post_count
 
     _log(f"source: {source_path} ({post_count} posts)")
     if gold_path.exists():
@@ -41,12 +45,15 @@ def main() -> None:
     _log("building LLM clients")
 
     result = ExtractionPipeline(
-        source=StaticJsonSource(source_path),
+        source=StaticJsonSource(source_path, limit=post_limit),
         agent_config=ExtractionAgentConfig(
             main_client=LoggingClient(_build_client(env), "main"),
             refinement_client=_wrap_refinement_client(_build_refinement_client(env)),
             current_datetime=env.get("CURRENT_DATETIME") or None,
             use_event_type_refinement=_bool(env.get("USE_EVENT_TYPE_REFINEMENT", "false")),
+            use_title_description_refinement=_bool(
+                env.get("USE_TITLE_DESCRIPTION_REFINEMENT", "false")
+            ),
             min_request_interval_seconds=float(env.get("MIN_REQUEST_INTERVAL_SECONDS", "0")),
             max_retries=int(env.get("MAX_RETRIES", "0")),
         ),
@@ -66,15 +73,16 @@ def main() -> None:
 
 
 class StaticJsonSource:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, limit: int | None = None) -> None:
         self.path = path
+        self.limit = limit
 
     def fetch_posts(self) -> list[SourcePost]:
         _log("loading source posts")
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(payload, list):
             raise ValueError("golden source must be a JSON list of SourcePost objects")
-        posts = [SourcePost.model_validate(item) for item in payload]
+        posts = [SourcePost.model_validate(item) for item in payload[: self.limit]]
         _log(f"loaded {len(posts)} source posts")
         _log("starting extraction")
         return posts
