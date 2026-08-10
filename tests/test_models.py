@@ -57,9 +57,26 @@ def test_event_validates_contract_fields():
     event = Event(**VALID_EVENT_DATA)
 
     assert event.title == "Открытая лекция по ИИ"
-    assert event.start_at == datetime(2026, 6, 15, 19, 0, tzinfo=timezone(timedelta(hours=3)))
+    assert event.start_at == datetime(2026, 6, 15, 19, 0)
     assert event.event_type == EventType.EDUCATION
     assert event.attendance_type == AttendanceType.OFFLINE
+
+
+@pytest.mark.parametrize(
+    ("start_at", "end_at"),
+    [
+        ("2026-09-10T19:00:00", "2026-09-10T21:00:00+03:00"),
+        ("2026-09-10T19:00:00+03:00", "2026-09-10T21:00:00"),
+        ("2026-09-10T19:00:00Z", "2026-09-10T21:00:00+03:00"),
+    ],
+)
+def test_event_normalizes_mixed_datetime_offsets_to_local_wall_time(start_at, end_at):
+    event = Event(**{**VALID_EVENT_DATA, "start_at": start_at, "end_at": end_at})
+
+    assert event.start_at == datetime(2026, 9, 10, 19, 0)
+    assert event.end_at == datetime(2026, 9, 10, 21, 0)
+    assert event.start_at.tzinfo is None
+    assert event.end_at.tzinfo is None
 
 
 def test_event_requires_core_fields():

@@ -189,6 +189,8 @@ client = GroqChatClient(
 
 Для моделей Groq с поддержкой Structured Outputs агент автоматически использует JSON Schema Mode. Для `openai/gpt-oss-20b` и `openai/gpt-oss-120b` включается строгий режим с гарантированным соответствием схеме; остальные клиенты сохраняют прежний JSON-интерфейс.
 
+`start_at` и `end_at` хранят локальные дату и время события без UTC offset; часовой пояс передается отдельно в поле `timezone`. Если LLM или пользователь передает ISO-дату с `Z`/offset, `Event` сохраняет указанные часы и минуты и удаляет информацию о смещении до проверки диапазона дат.
+
 `GROQ_MAX_RETRIES` теперь относится только к временным HTTP `5xx`. Формат и назначение заголовков описаны в [Groq Rate Limits](https://console.groq.com/docs/rate-limits); общий формат ошибок — в [Groq API Error Codes](https://console.groq.com/docs/errors).
 
 ## Запуск из `.env`

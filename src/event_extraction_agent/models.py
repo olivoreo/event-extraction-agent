@@ -215,6 +215,13 @@ class Event(BaseModel):
     def validate_attendance_type(cls, value: Any) -> AttendanceType:
         return normalize_attendance_type(value)
 
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def datetime_offset_becomes_local_wall_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is not None:
+            return value.replace(tzinfo=None)
+        return value
+
     @field_validator("end_at")
     @classmethod
     def end_at_must_not_be_before_start_at(cls, value: datetime | None, info: Any) -> datetime | None:
