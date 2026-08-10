@@ -74,6 +74,12 @@ def test_event_allows_missing_start_at():
     assert event.start_at is None
 
 
+def test_event_defaults_unknown_price_to_none():
+    event = Event(**{key: value for key, value in VALID_EVENT_DATA.items() if key != "price_text"})
+
+    assert event.price_text is None
+
+
 def test_event_has_no_persistence_fields():
     with pytest.raises(ValidationError):
         Event(**{**VALID_EVENT_DATA, "id": 1})

@@ -154,6 +154,7 @@ config = ExtractionAgentConfig(
 ```
 
 `refinement_client` опционален и используется при включенных refinement-флагах. Если он не задан, refinement будет использовать `main_client`.
+При Groq основной и refinement-клиент используют один `GROQ_API_KEY`; отдельно задавать ключ для refinement не нужно.
 
 Поддерживается любой LLM-клиент с методом:
 
@@ -184,7 +185,9 @@ client = GroqChatClient(
 `GroqChatClient` различает минутные и суточные HTTP `429` по типу лимита в ответе Groq:
 
 - `RPM`, `TPM`, `ITPM`, `OTPM`: клиент ждет `Retry-After` с запасом `0.25` секунды и повторяет тот же запрос до успеха. Если заголовка нет, используются `x-ratelimit-reset-tokens`, время из текста ошибки или безопасная пауза `60` секунд. Эти повторы не расходуют `max_retries` клиента или агента и не создают `llm_error`, поэтому batch продолжает обработку с текущего поста;
-- `RPD`, `TPD`: клиент не ждет суточного сброса. Пост получает статус `llm_error` и код ошибки `daily_rate_limit_exceeded`; incremental-режим повторит его при следующем запуске по обычной логике `retry_llm_errors=True`.
+- `RPD`, `TPD`: клиент не ждет суточного сброса. Текущий и оставшиеся посты получают `llm_error` с кодом `daily_rate_limit_exceeded` без новых API-вызовов; incremental-режим повторит их при следующем запуске по обычной логике `retry_llm_errors=True`.
+
+Для моделей Groq с поддержкой Structured Outputs агент автоматически использует JSON Schema Mode. Для `openai/gpt-oss-20b` и `openai/gpt-oss-120b` включается строгий режим с гарантированным соответствием схеме; остальные клиенты сохраняют прежний JSON-интерфейс.
 
 `GROQ_MAX_RETRIES` теперь относится только к временным HTTP `5xx`. Формат и назначение заголовков описаны в [Groq Rate Limits](https://console.groq.com/docs/rate-limits); общий формат ошибок — в [Groq API Error Codes](https://console.groq.com/docs/errors).
 
@@ -200,6 +203,7 @@ GROQ_MAX_RETRIES=3
 USE_EVENT_TYPE_REFINEMENT=false
 USE_TITLE_DESCRIPTION_REFINEMENT=false
 GOLDEN_POST_LIMIT=3
+GOLDEN_MAX_STATUS_MISMATCHES=0
 ```
 
 - `REQUEST_TIMEOUT_SECONDS` передается в `OllamaChatClient`/`GroqChatClient` как timeout одного HTTP-запроса.
@@ -207,8 +211,10 @@ GOLDEN_POST_LIMIT=3
 - `MAX_RETRIES` повторяет весь вызов агента после ошибки клиента.
 - `GROQ_MAX_RETRIES` ограничивает повторы Groq-клиента на HTTP `5xx`; минутные `429` повторяются до успеха отдельно.
 - `USE_EVENT_TYPE_REFINEMENT=false` экономит токены и запросы; включайте только если нужно дополнительно уточнять `event_type`.
-- `USE_TITLE_DESCRIPTION_REFINEMENT=false` включает отдельную проверку `title` и полной сухой выжимки в `description` для каждого найденного события.
+- `USE_TITLE_DESCRIPTION_REFINEMENT=true` включает отдельную проверку `title` и полной сухой выжимки в `description` для каждого найденного события.
+- `price_text` остается `null`, если бесплатность, цена или условие покупки не указаны явно.
 - `GOLDEN_POST_LIMIT` ограничивает число первых постов в `scripts/run_golden_extraction.py`; без него обрабатывается весь golden-набор.
+- `GOLDEN_MAX_STATUS_MISMATCHES=0` задает допустимое число расхождений статусов с golden-разметкой; при превышении скрипт завершается с ненулевым кодом.
 
 ## Что возвращает pipeline
 

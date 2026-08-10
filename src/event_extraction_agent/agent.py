@@ -35,6 +35,9 @@ from event_extraction_agent.prompts import (
     build_extraction_prompt,
     build_invalid_date_repair_prompt,
     build_title_description_refinement_prompt,
+    event_type_json_schema,
+    extraction_json_schema,
+    title_description_json_schema,
 )
 from event_extraction_agent.validator import ValidationIssue, validate_extraction_result
 
@@ -45,6 +48,12 @@ DEFAULT_GROQ_MAIN_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 DEFAULT_GROQ_MAX_RETRIES = 3
 GROQ_RATE_LIMIT_BUFFER_SECONDS = 0.25
 GROQ_RATE_LIMIT_FALLBACK_SECONDS = 60.0
+GROQ_STRICT_SCHEMA_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+GROQ_SCHEMA_MODELS = {
+    *GROQ_STRICT_SCHEMA_MODELS,
+    "openai/gpt-oss-safeguard-20b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+}
 
 _MONTHS = {
     "января": 1,
@@ -264,11 +273,35 @@ class GroqChatClient:
         self.max_retries = max(0, max_retries)
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        return self._complete(system_prompt, user_prompt, {"type": "json_object"})
+
+    def complete_with_schema(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: dict[str, Any],
+    ) -> str:
+        if self.model not in GROQ_SCHEMA_MODELS:
+            return self.complete(system_prompt, user_prompt)
+        return self._complete(
+            system_prompt,
+            user_prompt,
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "event_extraction",
+                    "strict": self.model in GROQ_STRICT_SCHEMA_MODELS,
+                    "schema": response_schema,
+                },
+            },
+        )
+
+    def _complete(self, system_prompt: str, user_prompt: str, response_format: dict[str, Any]) -> str:
         payload = {
             "model": self.model,
             "stream": False,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -411,7 +444,7 @@ class ExtractionAgent:
         )
 
         try:
-            llm_content = self._complete(client, SYSTEM_PROMPT, prompt)
+            llm_content = self._complete(client, SYSTEM_PROMPT, prompt, extraction_json_schema())
             response_payload = _parse_llm_json(llm_content)
         except Exception as exc:
             self._add_llm_attempt(stage=stage, client=client, success=False, error=str(exc))
@@ -503,12 +536,21 @@ class ExtractionAgent:
             metadata=self.last_metadata,
         )
 
-    def _complete(self, client: LLMClient, system_prompt: str, user_prompt: str) -> str:
+    def _complete(
+        self,
+        client: LLMClient,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
         last_error: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
             if self.rate_limiter is not None:
                 self.rate_limiter.wait()
             try:
+                complete_with_schema = getattr(client, "complete_with_schema", None)
+                if response_schema is not None and callable(complete_with_schema):
+                    return complete_with_schema(system_prompt, user_prompt, response_schema)
                 return client.complete(system_prompt, user_prompt)
             except Exception as exc:
                 last_error = exc
@@ -548,6 +590,7 @@ class ExtractionAgent:
         seen_keys: dict[str, int] = {}
         error_count = 0
         error_limit_reached = False
+        daily_limit_error: ExtractionError | None = None
 
         for index, post in enumerate(posts):
             if _is_blank_text(post.raw_text_for_prompt()) and batch_settings.skip_empty:
@@ -587,6 +630,18 @@ class ExtractionAgent:
                 )
                 continue
 
+            if daily_limit_error is not None:
+                outcomes.append(
+                    _outcome(
+                        status=ExtractionStatus.LLM_ERROR,
+                        post=post,
+                        errors=[daily_limit_error],
+                        metadata={"batch_index": index},
+                    )
+                )
+                error_count += 1
+                continue
+
             outcome = self.extract(post)
             metadata = dict(outcome.raw_llm_metadata or {})
             metadata["batch_index"] = index
@@ -595,6 +650,10 @@ class ExtractionAgent:
 
             if outcome.status in {ExtractionStatus.INVALID, ExtractionStatus.LLM_ERROR}:
                 error_count += 1
+            daily_limit_error = next(
+                (error for error in outcome.errors if error.code == "daily_rate_limit_exceeded"),
+                daily_limit_error,
+            )
 
         return _batch_result(outcomes, settings=batch_settings, error_limit_reached=error_limit_reached)
 
@@ -654,7 +713,12 @@ class ExtractionAgent:
 
         prompt = build_event_type_classification_prompt(raw_text=raw_text, draft=copied)
         try:
-            content = self._complete(self.refinement_llm_client, EVENT_TYPE_CLASSIFICATION_PROMPT, prompt)
+            content = self._complete(
+                self.refinement_llm_client,
+                EVENT_TYPE_CLASSIFICATION_PROMPT,
+                prompt,
+                event_type_json_schema(),
+            )
             payload = _parse_llm_json(content)
         except Exception as exc:
             self._add_llm_attempt(
@@ -692,7 +756,12 @@ class ExtractionAgent:
         client = self.title_description_refinement_llm_client
         prompt = build_title_description_refinement_prompt(raw_text=raw_text, draft=copied)
         try:
-            content = self._complete(client, TITLE_DESCRIPTION_REFINEMENT_PROMPT, prompt)
+            content = self._complete(
+                client,
+                TITLE_DESCRIPTION_REFINEMENT_PROMPT,
+                prompt,
+                title_description_json_schema(),
+            )
             payload = _parse_llm_json(content)
         except Exception as exc:
             self._add_llm_attempt(
@@ -791,8 +860,6 @@ def _repair_event_payload(
             copied["start_at"] = inferred_start_at
     _repair_application_dates(copied, raw_text=raw_text, published_at=published_at)
     _drop_inferred_duration_end_at(copied, raw_text=raw_text)
-    if _is_missing_value(copied.get("price_text")):
-        copied["price_text"] = "free"
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
     _filter_prompt_list(copied, "relevant_roles", ROLE_VALUES)
     _filter_prompt_list(copied, "industries", INDUSTRY_VALUES)

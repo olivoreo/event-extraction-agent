@@ -40,7 +40,7 @@ def main() -> None:
 
     _log(f"source: {source_path} ({post_count} posts)")
     if gold_path.exists():
-        _log(f"gold: {gold_path} expected={_gold_status_summary(gold_path)}")
+        _log(f"gold: {gold_path} expected={_gold_status_summary(gold_path, post_limit)}")
     _log(f"output: {output_path}")
     _log("building LLM clients")
 
@@ -70,6 +70,23 @@ def main() -> None:
         f"actual=extracted:{result.extracted} skipped:{result.skipped} "
         f"invalid:{result.invalid} llm_errors:{result.llm_errors} cached:{result.cached}"
     )
+    if gold_path.exists():
+        evaluation = _evaluate_statuses(result.outcomes, gold_path)
+        _log(
+            f"status_accuracy={evaluation['accuracy']:.1%} "
+            f"mismatches={len(evaluation['mismatches'])}/{evaluation['total']}"
+        )
+        for mismatch in evaluation["mismatches"][:20]:
+            _log(
+                f"mismatch {mismatch['external_id']}: "
+                f"expected={mismatch['expected']} actual={mismatch['actual']}"
+            )
+        allowed_mismatches = int(env.get("GOLDEN_MAX_STATUS_MISMATCHES", "0"))
+        if len(evaluation["mismatches"]) > allowed_mismatches:
+            raise SystemExit(
+                f"golden status mismatches exceed limit: "
+                f"{len(evaluation['mismatches'])} > {allowed_mismatches}"
+            )
 
 
 class StaticJsonSource:
@@ -103,6 +120,22 @@ class LoggingClient:
         _log(f"LLM {self.label} request #{self.calls} done")
         return response
 
+    def complete_with_schema(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: dict,
+    ) -> str:
+        complete = getattr(self.client, "complete_with_schema", None)
+        if not callable(complete):
+            return self.complete(system_prompt, user_prompt)
+        self.calls += 1
+        model = getattr(self.client, "model", "unknown")
+        _log(f"LLM {self.label} request #{self.calls} model={model} schema=json")
+        response = complete(system_prompt, user_prompt, response_schema)
+        _log(f"LLM {self.label} request #{self.calls} done")
+        return response
+
 
 def _build_refinement_client(env: dict[str, str]) -> OllamaChatClient | GroqChatClient | None:
     if not env.get("REFINEMENT_LLM_PROVIDER"):
@@ -124,7 +157,7 @@ def _build_client(env: dict[str, str], prefix: str = "") -> OllamaChatClient | G
 
     if provider == "groq":
         return GroqChatClient(
-            api_key=_required(env, f"{prefix}GROQ_API_KEY", fallback_key="GROQ_API_KEY"),
+            api_key=_required(env, "GROQ_API_KEY"),
             model=env.get(f"{prefix}GROQ_MODEL", env.get("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")),
             timeout_seconds=timeout_seconds,
             max_retries=int(env.get(f"{prefix}GROQ_MAX_RETRIES", env.get("GROQ_MAX_RETRIES", "3"))),
@@ -138,10 +171,33 @@ def _build_client(env: dict[str, str], prefix: str = "") -> OllamaChatClient | G
     )
 
 
-def _gold_status_summary(path: Path) -> str:
+def _gold_status_summary(path: Path, limit: int | None = None) -> str:
     data = json.loads(path.read_text(encoding="utf-8"))
-    counts = Counter(item["expected_status"] for item in data.get("items", []))
+    items = data.get("items", [])[:limit]
+    counts = Counter(item["expected_status"] for item in items)
     return " ".join(f"{key}:{counts[key]}" for key in ("extracted", "skipped", "invalid"))
+
+
+def _evaluate_statuses(outcomes: list, gold_path: Path) -> dict:
+    expected_by_id = {
+        item["external_id"]: item["expected_status"]
+        for item in json.loads(gold_path.read_text(encoding="utf-8")).get("items", [])
+    }
+    mismatches = []
+    for outcome in outcomes:
+        external_id = outcome.post.external_id
+        expected = expected_by_id.get(external_id)
+        actual = outcome.status.value
+        if expected != actual:
+            mismatches.append(
+                {"external_id": external_id, "expected": expected, "actual": actual}
+            )
+    total = len(outcomes)
+    return {
+        "total": total,
+        "accuracy": (total - len(mismatches)) / total if total else 1.0,
+        "mismatches": mismatches,
+    }
 
 
 def _source_post_count(path: Path) -> int:

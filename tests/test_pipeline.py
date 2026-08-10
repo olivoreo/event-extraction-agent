@@ -142,6 +142,25 @@ def test_pipeline_can_load_previous_result_and_save_next_result(tmp_path):
     assert loaded.outcomes[0].post.external_id == "post-1"
 
 
+def test_pipeline_preserves_previous_outcomes_when_source_reports_errors(tmp_path):
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
+    previous_result = BatchExtractionResult.from_outcomes([_existing_outcome(post)])
+    result_path = tmp_path / "events.json"
+    previous_result.save_json(result_path)
+    source = FakeSource([])
+    source.errors = [RuntimeError("VK unavailable")]
+
+    result = ExtractionPipeline(
+        source=source,
+        agent_config=ExtractionAgentConfig(main_client=FakeLLMClient([])),
+        previous_result_path=result_path,
+        save_result_path=result_path,
+    ).run()
+
+    assert result.total == 1
+    assert BatchExtractionResult.load_json(result_path).total == 1
+
+
 def test_pipeline_can_accumulate_existing_outcomes(tmp_path):
     cached_post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="post-1")
     old_post = SourcePost(text="6 июня в 19:00 пройдет концерт.", external_id="post-2")

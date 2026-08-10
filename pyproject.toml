@@ -8,7 +8,7 @@ version = "1.2.6"
 description = "Python library for extracting structured event data from text posts with LLM agents."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
 authors = [
   { name = "event-extraction-agent contributors" }
 ]

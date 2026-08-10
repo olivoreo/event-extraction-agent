@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 from event_extraction_agent import SourcePost
+from event_extraction_agent import ExtractionOutcome, ExtractionStatus
+from scripts.run_golden_extraction import _evaluate_statuses
 
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -39,3 +41,37 @@ def test_golden_eval_gold_shape_is_consistent():
         if status == "invalid":
             assert item["event"] is None
             assert item["skip_reason"] is None
+
+
+def test_golden_status_evaluation_reports_mismatches(tmp_path):
+    gold_path = tmp_path / "gold.json"
+    gold_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"external_id": "post-1", "expected_status": "extracted"},
+                    {"external_id": "post-2", "expected_status": "skipped"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    outcomes = [
+        ExtractionOutcome(
+            status=ExtractionStatus.SKIPPED,
+            event=None,
+            post=SourcePost(text="Первый", external_id="post-1"),
+        ),
+        ExtractionOutcome(
+            status=ExtractionStatus.SKIPPED,
+            event=None,
+            post=SourcePost(text="Второй", external_id="post-2"),
+        ),
+    ]
+
+    evaluation = _evaluate_statuses(outcomes, gold_path)
+
+    assert evaluation["accuracy"] == 0.5
+    assert evaluation["mismatches"] == [
+        {"external_id": "post-1", "expected": "extracted", "actual": "skipped"}
+    ]

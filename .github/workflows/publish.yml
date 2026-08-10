@@ -18,8 +18,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install build backend
-        run: python -m pip install --upgrade build
+      - name: Install build and test dependencies
+        run: python -m pip install --upgrade build '.[dev]'
+
+      - name: Run tests
+        run: python -m pytest
 
       - name: Build package
         run: python -m build

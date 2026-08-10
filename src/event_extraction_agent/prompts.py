@@ -104,7 +104,7 @@ SYSTEM_PROMPT = """
 
 Даты: start_at/end_at в ISO без offset/Z. Если нет ни даты/времени начала, ни даты окончания/дедлайна, это не мероприятие -> is_event=false. День+месяц без года бери из published_at; если дата раньше published_at, используй следующий год. Нет времени -> 00:00:00. Нет уверенной даты начала -> start_at=null. Не подменяй дату события дедлайном/розыгрышем/итогами. Для регистрации/заявок/голосования дедлайн без старта -> start_at=null, end_at=дедлайн; период "с X по Y" -> start_at=X, end_at=Y. end_at только при явном окончании этого же объекта. Длительность ("2 часа") не вычисляй. Последовательные дни можно одним периодом; непоследовательные даты - отдельные events.
 
-Поля: title строка для is_event=true; language для русского "ru"; timezone IANA если ясно из города/контекста, иначе "unknown"; attendance_type default OfflineEventAttendanceMode; price_text "free" если бесплатно/цена не указана, иначе кратко. venue_name/address/city только из явных фактов. Не возвращай source_name, source_url и raw_text.
+Поля: title строка для is_event=true; language для русского "ru"; timezone IANA если ясно из города/контекста, иначе "unknown"; attendance_type default OfflineEventAttendanceMode; price_text "free" только если бесплатное участие указано явно, иначе точная цена/условие из текста или null. venue_name/address/city только из явных фактов. Не возвращай source_name, source_url и raw_text.
 title — только название мероприятия без приписок и описательных деталей. Если название явно выделено кавычками/капсом/отдельной строкой, бери только выделенное название. Если явного названия нет, title — краткая суть события из текста.
 description — самодостаточная сухая выжимка, которая полностью раскрывает смысл мероприятия. Перескажи факты нейтрально: не копируй рекламные абзацы, убери эмоции, оценочные прилагательные, призывы, приветствия, хештеги и повторы. Сохрани все существенное: формат, темы/программу, условия участия, дедлайны, льготы/ограничения и контакты. Все указанные в посте ссылки для регистрации, покупки билетов, подачи заявки или участия перенеси в description дословно. Не ограничивай description одним предложением и не дублируй только title.
 target_audience_text — непустой понятный список подходящих групп и профессиональных ролей только на русском языке. Включай как явно указанную аудиторию, так и очевидно подходящие по теме и формату группы; например, для концерта — зрители и любители соответствующей музыки, для IT-форума — подходящие IT-специалисты и учащиеся. null допустим только когда аудиторию нельзя разумно определить даже по смыслу события. Не добавляй случайные аудитории.
@@ -127,6 +127,81 @@ def response_schema() -> dict[str, Any]:
         "skip_reason": None,
         "event": event_schema,
         "events": ["same shape as event"],
+    }
+
+
+def extraction_json_schema() -> dict[str, Any]:
+    nullable_string = {"type": ["string", "null"]}
+    event_properties: dict[str, Any] = {
+        "title": {"type": "string"},
+        "description": nullable_string,
+        "start_at": nullable_string,
+        "end_at": nullable_string,
+        "timezone": {"type": "string"},
+        "city": nullable_string,
+        "venue_name": nullable_string,
+        "address": nullable_string,
+        "event_type": {"type": "string", "enum": list(EVENT_TYPE_VALUES)},
+        "attendance_type": {"type": "string", "enum": list(ATTENDANCE_TYPE_VALUES)},
+        "language": {"type": "string"},
+        "relevant_roles": {
+            "anyOf": [
+                {"type": "array", "items": {"type": "string", "enum": list(ROLE_VALUES)}},
+                {"type": "null"},
+            ]
+        },
+        "industries": {
+            "anyOf": [
+                {"type": "array", "items": {"type": "string", "enum": list(INDUSTRY_VALUES)}},
+                {"type": "null"},
+            ]
+        },
+        "skills": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+        "price_text": nullable_string,
+        "target_audience_text": nullable_string,
+    }
+    event = {
+        "type": "object",
+        "properties": event_properties,
+        "required": list(EVENT_EXTRACTION_FIELDS),
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "is_event": {"type": "boolean"},
+            "skip_reason": {
+                "anyOf": [
+                    {"type": "string", "enum": list(SKIP_REASONS)},
+                    {"type": "null"},
+                ]
+            },
+            "event": {"anyOf": [event, {"type": "null"}]},
+            "events": {"anyOf": [{"type": "array", "items": event}, {"type": "null"}]},
+        },
+        "required": ["is_event", "skip_reason", "event", "events"],
+        "additionalProperties": False,
+    }
+
+
+def event_type_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"event_type": {"type": "string", "enum": list(EVENT_TYPE_VALUES)}},
+        "required": ["event_type"],
+        "additionalProperties": False,
+    }
+
+
+def title_description_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": ["string", "null"]},
+        },
+        "required": ["title", "description"],
+        "additionalProperties": False,
     }
 
 

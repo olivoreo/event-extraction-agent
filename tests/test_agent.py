@@ -194,6 +194,33 @@ def test_extract_marks_daily_groq_limit_without_agent_retries():
     assert len(client.calls) == 1
 
 
+def test_extract_batch_stops_calling_client_after_daily_groq_limit():
+    client = FakeLLMClient(GroqDailyRateLimitError("HTTP 429: tokens per day (TPD) exhausted"))
+    posts = [
+        SourcePost(text=f"{day} июня в 18:00 состоится концерт {day}.")
+        for day in range(5, 8)
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    assert len(client.calls) == 1
+    assert result.llm_errors == 3
+    assert all(outcome.errors[0].code == "daily_rate_limit_exceeded" for outcome in result.outcomes)
+
+
+def test_extract_keeps_unknown_price_as_none():
+    payload = _event_payload(start_at="2026-06-05T18:00:00+03:00")
+    payload["price_text"] = None
+    client = FakeLLMClient(
+        json.dumps({"is_event": True, "skip_reason": None, "event": payload}, ensure_ascii=False)
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text=RAW_TEXT))
+
+    assert outcome.event is not None
+    assert outcome.event.price_text is None
+
+
 def test_extract_allows_event_without_start_at_when_end_at_exists():
     client = FakeLLMClient(
         json.dumps(

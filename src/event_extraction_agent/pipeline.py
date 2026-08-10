@@ -73,7 +73,7 @@ class ExtractionPipeline:
                 settings=self.batch_settings,
                 retry_llm_errors=self.retry_cached_llm_errors,
             )
-            should_accumulate = (
+            should_accumulate = bool(getattr(self.source, "errors", [])) or (
                 self.accumulate_existing_outcomes
                 if accumulate_existing_outcomes is None
                 else accumulate_existing_outcomes

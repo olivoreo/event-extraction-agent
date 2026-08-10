@@ -5,6 +5,7 @@ import urllib.error
 import pytest
 
 from event_extraction_agent import GroqChatClient, GroqDailyRateLimitError, OllamaChatClient
+from scripts.run_golden_extraction import _build_client
 
 
 class FakeResponse:
@@ -49,6 +50,20 @@ def test_groq_client_requires_api_key():
         GroqChatClient(api_key="")
 
 
+def test_refinement_groq_client_uses_shared_api_key():
+    client = _build_client(
+        {
+            "GROQ_API_KEY": "shared-secret",
+            "REFINEMENT_GROQ_API_KEY": "ignored-secret",
+            "REFINEMENT_LLM_PROVIDER": "groq",
+        },
+        prefix="REFINEMENT_",
+    )
+
+    assert isinstance(client, GroqChatClient)
+    assert client.api_key == "shared-secret"
+
+
 def test_groq_client_builds_expected_payload(monkeypatch):
     captured = {}
 
@@ -67,6 +82,51 @@ def test_groq_client_builds_expected_payload(monkeypatch):
     assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
     assert captured["authorization"] == "Bearer secret"
     assert captured["payload"]["model"] == "groq-model"
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+
+
+def test_groq_client_uses_strict_json_schema_for_gpt_oss(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+
+    GroqChatClient(api_key="secret", model="openai/gpt-oss-120b").complete_with_schema(
+        "system", "user", schema
+    )
+
+    assert captured["payload"]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "event_extraction",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def test_groq_client_falls_back_to_json_object_for_model_without_schema_support(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    GroqChatClient(api_key="secret", model="llama-3.1-8b-instant").complete_with_schema(
+        "system", "user", {"type": "object"}
+    )
+
     assert captured["payload"]["response_format"] == {"type": "json_object"}
 
 

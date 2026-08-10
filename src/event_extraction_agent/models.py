@@ -177,7 +177,7 @@ class Event(BaseModel):
     relevant_roles: list[str] | None = None
     industries: list[str] | None = None
     skills: list[str] | None = None
-    price_text: str = "free"
+    price_text: str | None = None
     target_audience_text: str | None = None
 
     @field_validator("title", "timezone", "language", "raw_text")
