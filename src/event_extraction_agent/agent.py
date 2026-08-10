@@ -915,9 +915,9 @@ def _obvious_non_announcement_reason(raw_text: str) -> str | None:
 
 def _strip_datetime_offsets(payload: dict[str, Any]) -> None:
     for field in ("start_at", "end_at"):
-        value = payload.get(field)
-        if isinstance(value, str):
-            payload[field] = _DATETIME_OFFSET_SUFFIX.sub(r"\1", value)
+        parsed = _parse_datetime_value(payload.get(field))
+        if parsed is not None:
+            payload[field] = parsed.isoformat()
 
 
 def _extract_start_at(raw_text: str, published_at: str | None) -> str | None:
@@ -1166,13 +1166,15 @@ def _same_date(value: Any, iso_datetime: str) -> bool:
 
 def _parse_datetime_value(value: Any) -> datetime | None:
     if isinstance(value, datetime):
-        return value
-    if not isinstance(value, str):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(_DATETIME_OFFSET_SUFFIX.sub(r"\1", value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
         return None
-    try:
-        return datetime.fromisoformat(_DATETIME_OFFSET_SUFFIX.sub(r"\1", value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
 
 
 def _event_types_are_compatible(left: Any, right: Any) -> bool:

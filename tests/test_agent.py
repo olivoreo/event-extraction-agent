@@ -388,6 +388,30 @@ def test_extract_drops_end_at_inferred_from_duration():
     assert outcome.event.end_at is None
 
 
+def test_extract_normalizes_short_timezone_offset_before_duration_check():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": {
+                    **_event_payload(start_at="2026-02-07T10:00:00"),
+                    "end_at": "2026-02-07T11:30:00+03",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="7 февраля в 10:00 пройдет IT заряд. Продолжительность: 1,5 часа.")
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is None
+
+
 def test_extract_uses_unknown_timezone_without_local_context():
     payload = _event_payload(start_at=None)
     payload["timezone"] = None
