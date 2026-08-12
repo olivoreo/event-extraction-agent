@@ -125,6 +125,7 @@ class SourcePost(BaseModel):
     source_url: str | None = None
     published_at: datetime | str | None = None
     external_id: str | None = None
+    is_pinned: bool = False
 
     @field_validator("text", "raw_text")
     @classmethod

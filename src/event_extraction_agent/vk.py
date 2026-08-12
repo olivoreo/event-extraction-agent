@@ -449,6 +449,7 @@ def _to_source_post(
         source_url=build_vk_post_url(owner_id, post_id),
         published_at=_unix_to_iso(item.get("date") if isinstance(item.get("date"), int) else None),
         external_id=f"vk:wall{owner_id}_{post_id}",
+        is_pinned=bool(item.get("is_pinned")),
     )
 
 

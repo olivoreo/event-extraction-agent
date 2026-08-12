@@ -135,6 +135,8 @@ def _accumulate_outcomes(
 def _vk_current_window_cutoffs(outcomes: list[ExtractionOutcome]) -> dict[str, float]:
     cutoffs: dict[str, float] = {}
     for outcome in outcomes:
+        if outcome.post.is_pinned:
+            continue
         owner_id = _vk_owner_id(outcome.post.external_id)
         published_at = _published_timestamp(outcome.post.published_at)
         if owner_id is None or published_at is None:

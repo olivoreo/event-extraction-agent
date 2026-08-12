@@ -47,6 +47,7 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
                             "id": 10,
                             "owner_id": -123,
                             "date": 1_780_000_000,
+                            "is_pinned": 1,
                             "text": "  🎭 5 июня\n  в 18:00   пройдет лекция 😊.  ",
                             "attachments": [
                                 {"type": "link", "link": {"title": "Не отправлять в агент"}},
@@ -90,6 +91,7 @@ def test_vk_source_fetches_posts_and_maps_useful_metadata(monkeypatch):
     assert posts[0].source_url == "https://vk.com/wall-123_10"
     assert posts[0].external_id == "vk:wall-123_10"
     assert posts[0].published_at == "2026-05-28T20:26:40+00:00"
+    assert posts[0].is_pinned is True
 
     url, timeout = captured[0]
     query = parse_qs(urlparse(url).query)
