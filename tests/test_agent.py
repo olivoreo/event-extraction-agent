@@ -1147,6 +1147,40 @@ def test_extract_batch_deduplicates_events_by_title_categories_description_and_k
     assert result.duplicate_events[0].post.source_url == "https://vk.com/wall-45883617_23049"
 
 
+def test_extract_batch_deduplicates_same_event_with_different_event_types():
+    payloads = []
+    for event_type in ("Festival", "MusicEvent"):
+        payload = _event_payload("2026-08-23T19:00:00", title="Наследие")
+        payload.update(event_type=event_type, industries=["PerformingArts"])
+        payloads.append(json.dumps({"is_event": True, "skip_reason": None, "event": payload}, ensure_ascii=False))
+
+    result = ExtractionAgent(llm_client=FakeLLMClient(payloads)).extract_batch(
+        [
+            SourcePost(text="23 августа в 19:00 фестиваль «Наследие».", published_at="2026-08-10T12:00:00+03:00"),
+            SourcePost(text="23 августа в 19:00 «Наследие».", published_at="2026-08-11T12:00:00+03:00"),
+        ]
+    )
+
+    assert len(result.events) == 1
+    assert result.events[0].event.event_type.value == "MusicEvent"
+    assert len(result.duplicate_events) == 1
+
+
+def test_extract_batch_keeps_different_event_types_when_start_times_differ():
+    payloads = []
+    for start_at, event_type in (("2026-08-23T19:00:00", "Festival"), ("2026-08-23T20:00:00", "MusicEvent")):
+        payload = _event_payload(start_at, title="Наследие")
+        payload.update(event_type=event_type, industries=["PerformingArts"])
+        payloads.append(json.dumps({"is_event": True, "skip_reason": None, "event": payload}, ensure_ascii=False))
+
+    result = ExtractionAgent(llm_client=FakeLLMClient(payloads)).extract_batch(
+        [SourcePost(text="23 августа фестиваль «Наследие»."), SourcePost(text="23 августа концерт «Наследие».")]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+
+
 def test_extract_batch_deduplicates_events_with_shared_deadline_even_if_start_dates_differ():
     client = FakeLLMClient(
         [

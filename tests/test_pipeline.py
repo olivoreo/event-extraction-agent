@@ -424,12 +424,12 @@ def test_pipeline_prunes_missing_vk_outcomes_inside_current_window(tmp_path):
 
 
 def test_pipeline_keeps_missing_vk_outcomes_before_unpinned_window_when_pinned_post_is_old(tmp_path):
-    pinned_post = SourcePost(
+    previous_pinned_post = SourcePost(
         text="20 июля в 18:00 пройдет лекция.",
         published_at="2026-07-20T12:00:00+03:00",
         external_id="vk:wall-1_20",
-        is_pinned=True,
     )
+    pinned_post = previous_pinned_post.model_copy(update={"is_pinned": True})
     cached_post = SourcePost(
         text="25 июля в 19:00 пройдет концерт.",
         published_at="2026-07-25T12:00:00+03:00",
@@ -440,17 +440,29 @@ def test_pipeline_keeps_missing_vk_outcomes_before_unpinned_window_when_pinned_p
         published_at="2026-08-10T12:00:00+03:00",
         external_id="vk:wall-1_40",
     )
+    first_unpinned_post = SourcePost(
+        text="8 августа в 18:00 пройдет кинопоказ.",
+        published_at="2026-08-08T12:00:00+03:00",
+        external_id="vk:wall-1_38",
+    )
+    deleted_post = SourcePost(
+        text="9 августа в 19:00 пройдет выставка.",
+        published_at="2026-08-09T12:00:00+03:00",
+        external_id="vk:wall-1_39",
+    )
     previous_path = tmp_path / "previous.json"
     BatchExtractionResult.from_outcomes(
         [
-            _existing_outcome(pinned_post, title="Лекция", start_at="2026-07-20T18:00:00+03:00"),
+            _existing_outcome(previous_pinned_post, title="Лекция", start_at="2026-07-20T18:00:00+03:00"),
             _existing_outcome(cached_post, title="Концерт", start_at="2026-07-25T19:00:00+03:00"),
             _existing_outcome(latest_post, title="Встреча", start_at="2026-08-10T20:00:00+03:00"),
+            _existing_outcome(first_unpinned_post, title="Кинопоказ", start_at="2026-08-08T18:00:00+03:00"),
+            _existing_outcome(deleted_post, title="Выставка", start_at="2026-08-09T19:00:00+03:00"),
         ]
     ).save_json(previous_path)
 
     result = ExtractionPipeline(
-        source=FakeSource([pinned_post, latest_post]),
+        source=FakeSource([pinned_post, latest_post, first_unpinned_post]),
         agent_config=ExtractionAgentConfig(main_client=FakeLLMClient([])),
         previous_result_path=previous_path,
         accumulate_existing_outcomes=True,
@@ -459,9 +471,11 @@ def test_pipeline_keeps_missing_vk_outcomes_before_unpinned_window_when_pinned_p
     assert [outcome.post.external_id for outcome in result.outcomes] == [
         "vk:wall-1_20",
         "vk:wall-1_40",
+        "vk:wall-1_38",
         "vk:wall-1_25",
     ]
-    assert {item.event.title for item in result.events} == {"Лекция", "Концерт", "Встреча"}
+    assert result.outcomes[0].post.is_pinned is True
+    assert {item.event.title for item in result.events} == {"Лекция", "Концерт", "Встреча", "Кинопоказ"}
 
 
 def test_pipeline_rejects_invalid_source_return_shape():

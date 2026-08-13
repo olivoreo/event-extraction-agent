@@ -1099,7 +1099,12 @@ def _events_are_duplicates(left: ExtractedEvent, right: ExtractedEvent) -> bool:
         )
     if not dates_match:
         return False
-    if not _event_types_are_compatible(left.event.event_type, right.event.event_type):
+    if not _event_types_are_compatible(left.event.event_type, right.event.event_type) and not (
+        title_score >= 0.8
+        and left.event.start_at is not None
+        and right.event.start_at is not None
+        and left.event.start_at == right.event.start_at
+    ):
         return False
     if not _industries_are_compatible(left.event.industries, right.event.industries):
         return False
