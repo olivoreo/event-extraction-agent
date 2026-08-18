@@ -13,6 +13,7 @@ from event_extraction_agent.models import (
     SourcePost,
 )
 from event_extraction_agent.sources import SourceAdapter
+from event_extraction_agent.vk import VKSource
 
 
 @dataclass(frozen=True, init=False)
@@ -57,15 +58,23 @@ class ExtractionPipeline:
         save_result_path: str | Path | None = None,
         accumulate_existing_outcomes: bool | None = None,
     ) -> BatchExtractionResult:
-        posts = self.source.fetch_posts()
-        _validate_posts(posts)
-
         resolved_existing_outcomes = _resolve_existing_outcomes(
             explicit_outcomes=existing_outcomes,
             configured_outcomes=self.existing_outcomes,
             explicit_path=previous_result_path,
             configured_path=self.previous_result_path,
         )
+        if isinstance(self.source, VKSource) and resolved_existing_outcomes is not None:
+            cached_external_ids = {
+                outcome.post.external_id
+                for outcome in resolved_existing_outcomes
+                if outcome.post.external_id is not None
+            }
+            posts = self.source.fetch_posts(cached_external_ids=cached_external_ids)
+        else:
+            posts = self.source.fetch_posts()
+        _validate_posts(posts)
+
         if resolved_existing_outcomes is not None:
             result = self.agent.extract_incremental(
                 posts,

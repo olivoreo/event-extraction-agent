@@ -127,7 +127,7 @@ result = ExtractionPipeline(
 ).run()
 ```
 
-`VKSource` получает посты через `wall.get`, очищает текст для LLM, добавляет `source_name`, `source_url`, `published_at`, `external_id` и возвращает список `SourcePost`.
+`VKSource` получает посты через `wall.get`, очищает текст для LLM, добавляет `source_name`, `source_url`, `published_at`, `external_id` и возвращает список `SourcePost`. В incremental-режиме закрепленный VK-пост, уже присутствующий в предыдущих outcomes, не занимает место в `posts_per_source_limit`: источник дочитывает обычные посты до заданного лимита.
 
 Если один VK source недоступен, остальные источники по умолчанию продолжают обрабатываться. Ошибки доступны через `source.errors` или `fetch_posts_with_errors()`:
 

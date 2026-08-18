@@ -349,15 +349,16 @@ class VKSource:
             monotonic=monotonic,
         )
 
-    def fetch_posts(self) -> list[SourcePost]:
-        return self.fetch_posts_with_errors().posts
+    def fetch_posts(self, *, cached_external_ids: set[str] | None = None) -> list[SourcePost]:
+        return self.fetch_posts_with_errors(cached_external_ids=cached_external_ids).posts
 
-    def fetch_posts_with_errors(self) -> VKFetchResult:
+    def fetch_posts_with_errors(self, *, cached_external_ids: set[str] | None = None) -> VKFetchResult:
         posts: list[SourcePost] = []
         errors: list[VKApiError] = []
+        cached_ids = cached_external_ids or set()
         for source in self.sources:
             try:
-                posts.extend(self._fetch_source_posts(source))
+                posts.extend(self._fetch_source_posts(source, cached_external_ids=cached_ids))
             except VKApiError as error:
                 source_error = error if error.source is not None else error.with_source(source)
                 errors.append(source_error)
@@ -367,12 +368,18 @@ class VKSource:
         self.errors = errors
         return VKFetchResult(posts=posts, errors=errors)
 
-    def _fetch_source_posts(self, source: VKPostSource) -> list[SourcePost]:
+    def _fetch_source_posts(
+        self,
+        source: VKPostSource,
+        *,
+        cached_external_ids: set[str],
+    ) -> list[SourcePost]:
         current_offset = self.offset
         posts: list[SourcePost] = []
+        counted_posts = 0
 
-        while len(posts) < self.posts_per_source_limit:
-            requested_count = min(self.batch_size, self.posts_per_source_limit - len(posts))
+        while counted_posts < self.posts_per_source_limit:
+            requested_count = min(self.batch_size, self.posts_per_source_limit - counted_posts)
             response = self.api_client.get_wall(
                 source,
                 count=requested_count,
@@ -391,7 +398,9 @@ class VKSource:
                 post = _to_source_post(item, source, sources_by_owner_id)
                 if post is not None:
                     posts.append(post)
-                    if len(posts) >= self.posts_per_source_limit:
+                    if not (post.is_pinned and post.external_id in cached_external_ids):
+                        counted_posts += 1
+                    if counted_posts >= self.posts_per_source_limit:
                         break
 
             fetched_count = len(items)

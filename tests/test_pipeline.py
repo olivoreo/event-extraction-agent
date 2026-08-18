@@ -11,6 +11,7 @@ from event_extraction_agent import (
     ExtractionPipeline,
     ExtractionStatus,
     SourcePost,
+    VKSource,
 )
 
 
@@ -21,6 +22,17 @@ class FakeSource:
 
     def fetch_posts(self):
         self.calls += 1
+        return self.posts
+
+
+class RecordingVKSource(VKSource):
+    def __init__(self, posts: list[SourcePost]):
+        super().__init__(access_token="secret", sources=[-123], rate_limit_per_second=None)
+        self.posts = posts
+        self.cached_external_ids: set[str] | None = None
+
+    def fetch_posts(self, *, cached_external_ids: set[str] | None = None):
+        self.cached_external_ids = cached_external_ids
         return self.posts
 
 
@@ -117,6 +129,22 @@ def test_pipeline_can_run_incrementally_with_existing_outcomes():
     assert result.processed == 0
     assert result.outcomes[0].raw_llm_metadata is not None
     assert result.outcomes[0].raw_llm_metadata["incremental_cached"] is True
+
+
+def test_pipeline_passes_cached_vk_ids_to_vk_source():
+    post = SourcePost(text="5 июня в 18:00 пройдет лекция.", external_id="vk:wall-123_10")
+    source = RecordingVKSource([post])
+    existing_outcome = _existing_outcome(post)
+
+    result = ExtractionPipeline(
+        source=source,
+        agent_config=ExtractionAgentConfig(main_client=FakeLLMClient([])),
+        existing_outcomes=[existing_outcome],
+    ).run()
+
+    assert source.cached_external_ids == {"vk:wall-123_10"}
+    assert result.cached == 1
+    assert result.processed == 0
 
 
 def test_pipeline_can_load_previous_result_and_save_next_result(tmp_path):

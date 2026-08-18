@@ -131,6 +131,70 @@ def test_vk_source_fetches_more_raw_items_to_fill_text_post_limit(monkeypatch):
     assert [post.external_id for post in posts] == ["vk:wall-123_1", "vk:wall-123_3"]
 
 
+def test_vk_source_refills_limit_when_cached_pinned_post_is_returned(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        requests.append((query["count"][0], query["offset"][0]))
+        if query["offset"] == ["0"]:
+            items = [
+                {"id": 10, "owner_id": -123, "text": "Закрепленный пост", "is_pinned": 1},
+                {"id": 11, "owner_id": -123, "text": "Свежий пост 1"},
+            ]
+        else:
+            items = [{"id": 12, "owner_id": -123, "text": "Свежий пост 2"}]
+        return FakeResponse({"response": {"items": items}})
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    posts = VKSource(
+        access_token="secret",
+        sources=[-123],
+        posts_per_source_limit=2,
+        batch_size=2,
+        rate_limit_per_second=None,
+    ).fetch_posts(cached_external_ids={"vk:wall-123_10"})
+
+    assert requests == [("2", "0"), ("1", "2")]
+    assert [post.external_id for post in posts] == [
+        "vk:wall-123_10",
+        "vk:wall-123_11",
+        "vk:wall-123_12",
+    ]
+
+
+def test_vk_source_does_not_refill_for_uncached_pinned_post(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        query = parse_qs(urlparse(request.full_url).query)
+        requests.append((query["count"][0], query["offset"][0]))
+        return FakeResponse(
+            {
+                "response": {
+                    "items": [
+                        {"id": 10, "owner_id": -123, "text": "Новый закрепленный пост", "is_pinned": 1},
+                        {"id": 11, "owner_id": -123, "text": "Свежий пост"},
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("event_extraction_agent.vk.urlopen", fake_urlopen)
+
+    posts = VKSource(
+        access_token="secret",
+        sources=[-123],
+        posts_per_source_limit=2,
+        batch_size=2,
+        rate_limit_per_second=None,
+    ).fetch_posts(cached_external_ids=set())
+
+    assert requests == [("2", "0")]
+    assert [post.external_id for post in posts] == ["vk:wall-123_10", "vk:wall-123_11"]
+
+
 def test_vk_source_fetches_multiple_sources(monkeypatch):
     requested_sources = []
 
