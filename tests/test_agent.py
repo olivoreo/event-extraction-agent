@@ -7,9 +7,12 @@ from event_extraction_agent import (
     ExtractionAgent,
     ExtractionAgentConfig,
     ExtractionStatus,
+    ExtractedEvent,
+    Event,
     GroqDailyRateLimitError,
     SourcePost,
 )
+from event_extraction_agent.agent import _unmerged_duplicate_sources
 from event_extraction_agent.prompts import SYSTEM_PROMPT, build_extraction_prompt
 
 
@@ -1219,6 +1222,370 @@ def test_extract_batch_deduplicates_events_and_keeps_latest_post_event():
     assert [event.duplicate_of for event in result.duplicate_events] == [2, 2]
 
 
+def test_duplicate_merge_uses_latest_canonical_previous_and_skips_already_covered_sources():
+    event_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    event_payload["raw_text"] = "Живая картина"
+    event_payload.pop("seniority_level")
+    event = Event.model_validate(event_payload)
+    old = ExtractedEvent(
+        event=event,
+        post=SourcePost(
+            text="Старый анонс",
+            external_id="vk:wall-1_1",
+            published_at="2026-07-01T12:00:00+03:00",
+        ),
+        outcome_index=0,
+        event_index=0,
+    )
+    canonical = ExtractedEvent(
+        event=event,
+        post=SourcePost(
+            text="Более свежий анонс",
+            external_id="vk:wall-1_2",
+            published_at="2026-07-02T12:00:00+03:00",
+        ),
+        outcome_index=1,
+        event_index=0,
+        raw_llm_metadata={"duplicate_event_merge_sources": ["vk:wall-1_1"]},
+    )
+    fresh = ExtractedEvent(
+        event=event,
+        post=SourcePost(
+            text="Самый свежий анонс",
+            external_id="vk:wall-1_3",
+            published_at="2026-07-03T12:00:00+03:00",
+        ),
+        outcome_index=2,
+        event_index=0,
+    )
+
+    selected, covered = _unmerged_duplicate_sources(fresh, [old, canonical])
+
+    assert selected == [canonical]
+    assert covered == {"vk:wall-1_1", "vk:wall-1_2"}
+
+    merge_response = json.dumps(
+        {
+            "description": "Обогащенное описание",
+            "relevant_roles": ["Participant"],
+            "industries": ["Art"],
+            "skills": ["painting"],
+            "target_audience_text": "Художники",
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(merge_response)
+    merged = ExtractionAgent(llm_client=client)._merge_duplicate_event_group(fresh, [old, canonical])
+
+    assert len(client.calls) == 1
+    assert "Старый анонс" not in client.calls[0][1]
+    assert merged.raw_llm_metadata is not None
+    assert merged.raw_llm_metadata["duplicate_event_merge_sources"] == ["vk:wall-1_1", "vk:wall-1_2"]
+
+    repeat_client = FakeLLMClient("should-not-be-called")
+    repeated = ExtractionAgent(llm_client=repeat_client)._merge_duplicate_event_group(merged, [old, canonical])
+
+    assert repeated == merged
+    assert repeat_client.calls == []
+
+
+def test_duplicate_merge_tracks_source_without_external_id_by_text_hash():
+    event_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    event_payload["raw_text"] = "Живая картина"
+    event_payload.pop("seniority_level")
+    event = Event.model_validate(event_payload)
+    old = ExtractedEvent(
+        event=event,
+        post=SourcePost(text="Один и тот же пост без external id"),
+        outcome_index=0,
+        event_index=0,
+    )
+    fresh = ExtractedEvent(
+        event=event,
+        post=SourcePost(text="Свежий canonical"),
+        outcome_index=1,
+        event_index=0,
+    )
+
+    selected, covered = _unmerged_duplicate_sources(fresh, [old])
+    assert selected == [old]
+    assert len(covered) == 1
+    source_key = next(iter(covered))
+    assert source_key.startswith("text-sha256:")
+
+    fresh_with_metadata = fresh.model_copy(
+        update={"raw_llm_metadata": {"duplicate_event_merge_sources": [source_key]}}
+    )
+    selected_again, covered_again = _unmerged_duplicate_sources(fresh_with_metadata, [old])
+    assert selected_again == []
+    assert covered_again == {source_key}
+
+
+def test_duplicate_merge_skips_llm_when_fresh_canonical_already_covers_previous_sources():
+    event_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    event_payload["raw_text"] = "Живая картина"
+    event_payload.pop("seniority_level")
+    event = Event.model_validate(event_payload)
+    old = ExtractedEvent(
+        event=event,
+        post=SourcePost(text="Старый анонс", external_id="vk:wall-1_1"),
+        outcome_index=0,
+        event_index=0,
+    )
+    fresh = ExtractedEvent(
+        event=event,
+        post=SourcePost(text="Свежий canonical", external_id="vk:wall-1_2"),
+        outcome_index=1,
+        event_index=0,
+        raw_llm_metadata={"duplicate_event_merge_sources": ["vk:wall-1_1"]},
+    )
+    client = FakeLLMClient("should-not-be-called")
+
+    merged = ExtractionAgent(llm_client=client)._merge_duplicate_event_group(fresh, [old])
+
+    assert merged == fresh
+    assert client.calls == []
+
+
+def test_extract_batch_merges_semantic_fields_into_latest_duplicate_without_overwriting_facts():
+    old_payload = _event_payload(
+        "2026-07-08T19:00:00",
+        title="Живая картина",
+        venue_name="Старый зал",
+        city="Волгоград",
+    )
+    old_payload.update(
+        description="Мастер-класс по живописи на спилах дерева с разбором техники.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+        skills=["painting"],
+        target_audience_text="Художники и начинающие мастера",
+    )
+    fresh_payload = _event_payload(
+        "2026-07-08T20:00:00",
+        title="Живая картина",
+        venue_name="Новый зал",
+        city="Волгоград",
+    )
+    fresh_payload.update(
+        description="Напоминание о мастер-классе.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+        skills=None,
+        target_audience_text="Участники мастер-класса",
+        price_text="500 ₽",
+    )
+    merge_response = json.dumps(
+        {
+            "description": "Мастер-класс по живописи на спилах дерева с разбором техники.",
+            "relevant_roles": ["Participant"],
+            "industries": ["Art"],
+            "skills": ["painting"],
+            "target_audience_text": "Художники, начинающие мастера и участники мастер-класса",
+            "start_at": "2026-07-08T19:00:00",
+            "venue_name": "Старый зал",
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            merge_response,
+        ]
+    )
+    old_post = SourcePost(
+        text="8 июля в 19:00 мастер-класс Живая картина в Старом зале.",
+        source_url="https://vk.com/old",
+        external_id="vk:wall-1_1",
+        published_at="2026-07-01T12:00:00+03:00",
+    )
+    fresh_post = SourcePost(
+        text="8 июля в 20:00 мастер-класс Живая картина теперь в Новом зале. Цена 500 ₽.",
+        source_url="https://vk.com/fresh",
+        external_id="vk:wall-1_2",
+        published_at="2026-07-07T12:00:00+03:00",
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch([old_post, fresh_post])
+
+    assert len(client.calls) == 3
+    assert len(result.events) == 1
+    merged = result.events[0]
+    assert merged.post == fresh_post
+    assert merged.event.start_at.isoformat() == "2026-07-08T20:00:00"
+    assert merged.event.venue_name == "Новый зал"
+    assert merged.event.price_text == "500 ₽"
+    assert merged.event.raw_text == fresh_post.text
+    assert merged.event.description == "Мастер-класс по живописи на спилах дерева с разбором техники."
+    assert merged.event.skills == ["painting"]
+    assert merged.event.target_audience_text == "Художники, начинающие мастера и участники мастер-класса"
+    assert result.outcomes[1].event is not None
+    assert result.outcomes[1].event.description == merged.event.description
+    assert result.outcomes[1].event.skills == ["painting"]
+    assert merged.raw_llm_metadata is not None
+    assert merged.raw_llm_metadata["duplicate_event_merge"] == "completed"
+    assert merged.raw_llm_metadata["duplicate_event_merge_sources"] == ["vk:wall-1_1"]
+    assert "Мастер-класс по живописи на спилах дерева с разбором техники." in client.calls[2][1]
+    assert "Старый зал" not in client.calls[2][1]
+    assert "Новый зал" in client.calls[2][1]
+
+
+def test_extract_batch_duplicate_merge_failure_keeps_fresh_event_unchanged():
+    old_payload = _event_payload(
+        "2026-07-08T19:00:00",
+        title="Живая картина",
+        venue_name="Старый зал",
+        city="Волгоград",
+    )
+    old_payload["description"] = "Подробное старое описание."
+    fresh_payload = _event_payload(
+        "2026-07-08T20:00:00",
+        title="Живая картина",
+        venue_name="Новый зал",
+        city="Волгоград",
+    )
+    fresh_payload["description"] = "Короткое свежее описание."
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            "not-json",
+        ]
+    )
+    old_post = SourcePost(
+        text="8 июля в 19:00 мастер-класс Живая картина в Старом зале.",
+        published_at="2026-07-01T12:00:00+03:00",
+    )
+    fresh_post = SourcePost(
+        text="8 июля в 20:00 мастер-класс Живая картина теперь в Новом зале.",
+        published_at="2026-07-07T12:00:00+03:00",
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch([old_post, fresh_post])
+
+    assert len(result.events) == 1
+    kept = result.events[0]
+    assert kept.post == fresh_post
+    assert kept.event.description == "Короткое свежее описание."
+    assert kept.event.start_at.isoformat() == "2026-07-08T20:00:00"
+    assert kept.event.venue_name == "Новый зал"
+    assert kept.raw_llm_metadata is not None
+    assert kept.raw_llm_metadata["duplicate_event_merge"] == "failed"
+    assert result.outcomes[1].event is not None
+    assert result.outcomes[1].event.description == "Короткое свежее описание."
+
+
+def test_extract_batch_rejects_merged_description_with_unconfirmed_old_link():
+    old_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    old_payload.update(
+        description="Подробная программа мастер-класса. Регистрация: https://old.example/register",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    fresh_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    fresh_payload.update(
+        description="Свежий анонс мастер-класса.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+        target_audience_text="Художники",
+    )
+    merge_response = json.dumps(
+        {
+            "description": "Подробная программа мастер-класса. Регистрация: https://old.example/register",
+            "relevant_roles": ["Participant"],
+            "industries": ["Art"],
+            "skills": ["painting"],
+            "target_audience_text": "Художники и начинающие мастера",
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            merge_response,
+        ]
+    )
+    posts = [
+        SourcePost(text="8 июля мастер-класс Живая картина.", published_at="2026-07-01T12:00:00+03:00"),
+        SourcePost(text="8 июля снова пройдет мастер-класс Живая картина.", published_at="2026-07-07T12:00:00+03:00"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    merged = result.events[0]
+    assert merged.event.description == "Свежий анонс мастер-класса."
+    assert merged.event.skills == ["painting"]
+    assert merged.event.target_audience_text == "Художники и начинающие мастера"
+    assert merged.raw_llm_metadata is not None
+    assert merged.raw_llm_metadata["duplicate_event_merge_description"] == "rejected_unconfirmed_contacts"
+    assert "https://old.example/register" not in client.calls[2][1]
+
+
+def test_extract_batch_partial_duplicate_merge_keeps_missing_fresh_fields():
+    old_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    fresh_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    old_payload.update(
+        description="Свежее описание.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    fresh_payload.update(
+        description="Свежее описание.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+        skills=["drawing"],
+        target_audience_text="Художники",
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            json.dumps({"description": "Обогащенное описание.", "skills": None}, ensure_ascii=False),
+        ]
+    )
+    posts = [
+        SourcePost(text="8 июля мастер-класс Живая картина.", published_at="2026-07-01T12:00:00+03:00"),
+        SourcePost(text="8 июля снова пройдет мастер-класс Живая картина.", published_at="2026-07-07T12:00:00+03:00"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    assert len(result.events) == 1
+    merged = result.events[0].event
+    assert merged.description == "Обогащенное описание."
+    assert merged.relevant_roles == ["Participant"]
+    assert merged.industries == ["Art"]
+    assert merged.skills == ["drawing"]
+    assert merged.target_audience_text == "Художники"
+    assert result.events[0].raw_llm_metadata is not None
+    assert result.events[0].raw_llm_metadata["duplicate_event_merge"] == "partial"
+    assert "duplicate_event_merge_sources" not in result.events[0].raw_llm_metadata
+
+
+def test_extract_batch_can_disable_duplicate_event_merge():
+    client = FakeLLMClient(
+        [
+            _event_response("2026-06-20T17:00:00", title="Фестиваль Веретено"),
+            _event_response("2026-06-20T17:00:00", title="Фестиваль Веретено"),
+        ]
+    )
+    posts = [
+        SourcePost(text="20 июня фестиваль Веретено.", published_at="2026-06-10T12:00:00+00:00"),
+        SourcePost(text="20 июня состоится фестиваль Веретено.", published_at="2026-06-19T12:00:00+00:00"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        posts,
+        settings=BatchExtractionSettings(merge_event_duplicates=False),
+    )
+
+    assert len(client.calls) == 2
+    assert len(result.events) == 1
+    assert result.events[0].outcome_index == 1
+
+
 def test_extract_batch_deduplicates_events_by_title_categories_description_and_keeps_latest():
     client = FakeLLMClient(
         [
@@ -1487,7 +1854,7 @@ def test_extract_incremental_reuses_unchanged_outcomes_and_processes_changed_pos
 
     result = ExtractionAgent(llm_client=client).extract_incremental(posts, existing)
 
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
     assert result.total == 2
     assert result.cached == 1
     assert result.processed == 1

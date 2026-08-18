@@ -213,6 +213,62 @@ def title_description_json_schema() -> dict[str, Any]:
     }
 
 
+DUPLICATE_EVENT_MERGE_PROMPT = """
+Ты объединяешь смысловую информацию о двух или нескольких версиях одного и того же мероприятия.
+Самая свежая версия уже выбрана системой и остается основной. Не меняй фактические и идентифицирующие поля свежего события: title, start_at, end_at, timezone, city, venue_name, address, event_type, attendance_type, language и price_text.
+
+Верни JSON ровно с пятью ключами: description, relevant_roles, industries, skills, target_audience_text. Не добавляй другие ключи.
+
+Правила merge:
+1. Сохрани всю полезную непротиворечивую информацию из свежего события.
+2. Предыдущие версии передаются только как источник смысловых enrichment-полей. Их description может содержать устаревшую логистику. Используй оттуда только программу, темы, содержание и аудиторию, если свежая версия этого не раскрывает.
+3. Никогда не переноси из предыдущих description старые дату, время, место, адрес, цену, формат, ссылки, телефоны или условия регистрации. Эти параметры могли измениться; для них доверяй только свежей версии.
+4. Если старая и свежая версии противоречат друг другу, доверяй свежей версии и не возвращай устаревшую информацию.
+5. Не выдумывай факты, которых нет ни в одной переданной версии события.
+6. description должен быть единым сухим самодостаточным описанием без рекламы, повторов и упоминаний того, что информация была объединена.
+7. relevant_roles, industries и skills объединяй без дублей. Используй только разрешенные значения для relevant_roles и industries.
+8. target_audience_text объедини по смыслу кратко и на русском языке, без случайных аудиторий.
+9. null используй только когда полезной информации для поля нет ни в одной версии.
+
+Верни только валидный JSON без markdown/prose.
+""".strip()
+
+
+def duplicate_event_merge_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "description": {"type": ["string", "null"]},
+            "relevant_roles": {
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string", "enum": list(ROLE_VALUES)}},
+                    {"type": "null"},
+                ]
+            },
+            "industries": {
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string", "enum": list(INDUSTRY_VALUES)}},
+                    {"type": "null"},
+                ]
+            },
+            "skills": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+            "target_audience_text": {"type": ["string", "null"]},
+        },
+        "required": ["description", "relevant_roles", "industries", "skills", "target_audience_text"],
+        "additionalProperties": False,
+    }
+
+
+def build_duplicate_event_merge_prompt(*, fresh: dict[str, Any], previous: list[dict[str, Any]]) -> str:
+    return f"""
+Самая свежая версия события:
+{json.dumps(fresh, ensure_ascii=False, separators=(",", ":"), default=str)}
+
+Предыдущие версии того же события:
+{json.dumps(previous, ensure_ascii=False, separators=(",", ":"), default=str)}
+""".strip()
+
+
 def build_extraction_prompt(
     raw_text: str,
     source_name: str | None = None,

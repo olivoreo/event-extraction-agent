@@ -92,6 +92,7 @@ class ExtractionPipeline:
                     _accumulate_outcomes(result.outcomes, resolved_existing_outcomes),
                     settings=self.batch_settings,
                     error_limit_reached=result.error_limit_reached,
+                    duplicate_event_merger=self.agent._merge_duplicate_event_group,
                 )
         else:
             result = self.agent.extract_batch(posts, settings=self.batch_settings)
