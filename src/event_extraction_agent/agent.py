@@ -99,7 +99,7 @@ _DATE_RANGE_TIME_PATTERN = re.compile(
     re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
 _DATE_RANGE_PATTERN = re.compile(
-    rf"\b(?P<start_day>\d{{1,2}})\s*(?P<connector>и|[-–—])\s*"
+    rf"\b(?P<start_day>\d{{1,2}})\s*[-–—]\s*"
     rf"(?P<end_day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
     re.IGNORECASE | re.UNICODE,
 )
@@ -831,7 +831,7 @@ def _response_event_payloads(response_payload: dict[str, Any]) -> list[dict[str,
 def _expand_event_payloads(payloads: list[dict[str, Any]], raw_text: str, published_at: str | None) -> list[dict[str, Any]]:
     if len(payloads) != 1:
         return payloads
-    repeated_starts = _non_contiguous_repeated_starts(raw_text, published_at)
+    repeated_starts = _listed_repeated_starts(raw_text, published_at)
     if len(repeated_starts) < 2:
         return payloads
     expanded = []
@@ -877,6 +877,8 @@ def _repair_event_payload(
     _drop_inferred_duration_end_at(copied, raw_text=raw_text)
     _repair_explicit_date_range_end_at(copied, raw_text=raw_text)
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
+    if copied.get("attendance_type") == "unknown":
+        copied["attendance_type"] = "OfflineEventAttendanceMode"
     _filter_prompt_list(copied, "relevant_roles", ROLE_VALUES)
     _filter_prompt_list(copied, "industries", INDUSTRY_VALUES)
     skills = copied.get("skills")
@@ -886,8 +888,6 @@ def _repair_event_payload(
             if isinstance(skills, list)
             else None
         )
-    if copied.get("attendance_type") == "unknown":
-        copied["attendance_type"] = "OfflineEventAttendanceMode"
     return copied
 
 
@@ -946,8 +946,6 @@ def _explicit_range_end_date(raw_text: str, start_date: date) -> date | None:
         end_day = int(match.group("end_day"))
         month = _MONTHS[match.group("month").lower()]
         if (start_date.day, start_date.month) != (start_day, month):
-            continue
-        if match.group("connector").lower() == "и" and end_day != start_day + 1:
             continue
         try:
             candidate = date(start_date.year, month, end_day)
@@ -1044,12 +1042,12 @@ def _extract_deadline_at(raw_text: str, published_at: str | None) -> str | None:
     )
 
 
-def _non_contiguous_repeated_starts(raw_text: str, published_at: str | None) -> list[str]:
+def _listed_repeated_starts(raw_text: str, published_at: str | None) -> list[str]:
     match = _LISTED_DATES_TIME_PATTERN.search(raw_text)
     if match is None:
         return []
     days = [int(value) for value in re.findall(r"\d{1,2}", match.group("days"))]
-    if len(days) < 2 or _is_consecutive(days):
+    if len(days) < 2:
         return []
 
     month = _MONTHS[match.group("month").lower()]
@@ -1060,11 +1058,6 @@ def _non_contiguous_repeated_starts(raw_text: str, published_at: str | None) -> 
         for day in days
     ]
     return [value for value in starts if value is not None]
-
-
-def _is_consecutive(values: list[int]) -> bool:
-    ordered = sorted(values)
-    return all(right - left == 1 for left, right in zip(ordered, ordered[1:]))
 
 
 def _build_start_at(day: int, month: int, hour: int, minute: int, published_at: str | None) -> str | None:

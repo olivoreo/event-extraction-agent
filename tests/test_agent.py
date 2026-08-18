@@ -72,6 +72,25 @@ def test_extract_returns_outcome_with_event():
     ]
 
 
+def test_extract_defaults_unknown_attendance_type_to_offline():
+    payload = _event_payload(start_at="2026-06-05T18:00:00")
+    payload["attendance_type"] = "unknown"
+    client = FakeLLMClient(
+        json.dumps(
+            {"is_event": True, "skip_reason": None, "event": payload},
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="5 июня в 18:00 пройдет встреча. Формат не указан.")
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.attendance_type.value == "OfflineEventAttendanceMode"
+
+
 def test_extract_sends_raw_text_to_llm_when_present():
     client = FakeLLMClient(
         json.dumps(
@@ -438,7 +457,7 @@ def test_extract_uses_unknown_timezone_without_local_context():
     assert outcome.event.timezone == "unknown"
 
 
-def test_extract_repairs_consecutive_date_range_with_shared_time():
+def test_extract_splits_consecutive_listed_dates_with_shared_time():
     client = FakeLLMClient(
         json.dumps(
             {
@@ -458,10 +477,12 @@ def test_extract_repairs_consecutive_date_range_with_shared_time():
     )
 
     assert outcome.status == ExtractionStatus.EXTRACTED
-    assert outcome.event is not None
-    assert outcome.event.start_at.isoformat() == "2026-06-19T17:00:00"
-    assert outcome.event.end_at is not None
-    assert outcome.event.end_at.isoformat() == "2026-06-20T00:00:00"
+    assert outcome.events is not None
+    assert [event.start_at.isoformat() for event in outcome.events] == [
+        "2026-06-19T17:00:00",
+        "2026-06-20T17:00:00",
+    ]
+    assert [event.end_at for event in outcome.events] == [None, None]
 
 
 def test_extract_repairs_missing_end_at_from_dash_date_range():
@@ -597,7 +618,7 @@ def test_extract_splits_non_contiguous_repeated_dates_into_events():
     assert [event.end_at for event in outcome.events] == [None, None]
 
 
-def test_extract_keeps_consecutive_listed_dates_as_single_event():
+def test_extract_splits_consecutive_listed_dates_into_events():
     client = FakeLLMClient(
         json.dumps(
             {
@@ -621,11 +642,13 @@ def test_extract_keeps_consecutive_listed_dates_as_single_event():
     )
 
     assert outcome.status == ExtractionStatus.EXTRACTED
-    assert outcome.events is None
-    assert outcome.event is not None
-    assert outcome.event.start_at.isoformat() == "2026-01-03T14:00:00"
-    assert outcome.event.end_at is not None
-    assert outcome.event.end_at.isoformat() == "2026-01-05T17:00:00"
+    assert outcome.events is not None
+    assert [event.start_at.isoformat() for event in outcome.events] == [
+        "2026-01-03T14:00:00",
+        "2026-01-04T14:00:00",
+        "2026-01-05T14:00:00",
+    ]
+    assert [event.end_at for event in outcome.events] == [None, None, None]
 
 
 def test_extract_omits_events_for_single_event_list_from_llm():
