@@ -98,6 +98,21 @@ _DATE_RANGE_TIME_PATTERN = re.compile(
     r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b",
     re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
+_DATE_RANGE_PATTERN = re.compile(
+    rf"\b(?P<start_day>\d{{1,2}})\s*(?P<connector>и|[-–—])\s*"
+    rf"(?P<end_day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_DATE_FROM_TO_RANGE_PATTERN = re.compile(
+    rf"\bс\s+(?P<start_day>\d{{1,2}})(?:\s*(?P<start_month>{_MONTH_PATTERN}))?\s+по\s+"
+    rf"(?P<end_day>\d{{1,2}})\s*(?P<end_month>{_MONTH_PATTERN})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_DATE_CROSS_MONTH_RANGE_PATTERN = re.compile(
+    rf"\b(?P<start_day>\d{{1,2}})\s*(?P<start_month>{_MONTH_PATTERN})\s*[-–—]\s*"
+    rf"(?P<end_day>\d{{1,2}})\s*(?P<end_month>{_MONTH_PATTERN})\b",
+    re.IGNORECASE | re.UNICODE,
+)
 _LISTED_DATES_TIME_PATTERN = re.compile(
     rf"\b(?P<days>\d{{1,2}}(?:\s*(?:,|и)\s*\d{{1,2}})+)\s*(?P<month>{_MONTH_PATTERN})\b"
     r"(?:(?:(?!\b\d{1,2}\s*(?:"
@@ -860,6 +875,7 @@ def _repair_event_payload(
             copied["start_at"] = inferred_start_at
     _repair_application_dates(copied, raw_text=raw_text, published_at=published_at)
     _drop_inferred_duration_end_at(copied, raw_text=raw_text)
+    _repair_explicit_date_range_end_at(copied, raw_text=raw_text)
     _coerce_prompt_enum(copied, "attendance_type", ATTENDANCE_TYPE_VALUES)
     _filter_prompt_list(copied, "relevant_roles", ROLE_VALUES)
     _filter_prompt_list(copied, "industries", INDUSTRY_VALUES)
@@ -899,6 +915,67 @@ def _drop_inferred_duration_end_at(payload: dict[str, Any], raw_text: str) -> No
         return
     if "продолжительность" in raw_text.lower() or re.search(r"\b\d+(?:[,.]\d+)?\s*час", raw_text, re.IGNORECASE):
         payload["end_at"] = None
+
+
+def _repair_explicit_date_range_end_at(payload: dict[str, Any], raw_text: str) -> None:
+    if not _is_missing_value(payload.get("end_at")):
+        return
+    start_at = _parse_datetime_value(payload.get("start_at"))
+    if start_at is None:
+        return
+
+    end_date = _explicit_range_end_date(raw_text, start_at.date())
+    if end_date is None:
+        return
+    payload["end_at"] = datetime.combine(end_date, time.min).isoformat()
+
+
+def _explicit_range_end_date(raw_text: str, start_date: date) -> date | None:
+    for match in _DATE_CROSS_MONTH_RANGE_PATTERN.finditer(raw_text):
+        candidate = _range_end_date_from_match(match, start_date)
+        if candidate is not None:
+            return candidate
+
+    for match in _DATE_FROM_TO_RANGE_PATTERN.finditer(raw_text):
+        candidate = _range_end_date_from_match(match, start_date)
+        if candidate is not None:
+            return candidate
+
+    for match in _DATE_RANGE_PATTERN.finditer(raw_text):
+        start_day = int(match.group("start_day"))
+        end_day = int(match.group("end_day"))
+        month = _MONTHS[match.group("month").lower()]
+        if (start_date.day, start_date.month) != (start_day, month):
+            continue
+        if match.group("connector").lower() == "и" and end_day != start_day + 1:
+            continue
+        try:
+            candidate = date(start_date.year, month, end_day)
+        except ValueError:
+            continue
+        if candidate > start_date:
+            return candidate
+    return None
+
+
+def _range_end_date_from_match(match: re.Match[str], start_date: date) -> date | None:
+    start_day = int(match.group("start_day"))
+    end_day = int(match.group("end_day"))
+    start_month_name = match.groupdict().get("start_month") or match.groupdict().get("end_month")
+    end_month_name = match.groupdict().get("end_month")
+    if start_month_name is None or end_month_name is None:
+        return None
+    start_month = _MONTHS[start_month_name.lower()]
+    end_month = _MONTHS[end_month_name.lower()]
+    if (start_date.day, start_date.month) != (start_day, start_month):
+        return None
+
+    end_year = start_date.year + (1 if (end_month, end_day) < (start_month, start_day) else 0)
+    try:
+        candidate = date(end_year, end_month, end_day)
+    except ValueError:
+        return None
+    return candidate if candidate > start_date else None
 
 
 def _obvious_non_announcement_reason(raw_text: str) -> str | None:

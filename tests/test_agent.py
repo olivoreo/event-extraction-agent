@@ -438,7 +438,7 @@ def test_extract_uses_unknown_timezone_without_local_context():
     assert outcome.event.timezone == "unknown"
 
 
-def test_extract_keeps_first_date_in_date_range_with_shared_time():
+def test_extract_repairs_consecutive_date_range_with_shared_time():
     client = FakeLLMClient(
         json.dumps(
             {
@@ -460,6 +460,108 @@ def test_extract_keeps_first_date_in_date_range_with_shared_time():
     assert outcome.status == ExtractionStatus.EXTRACTED
     assert outcome.event is not None
     assert outcome.event.start_at.isoformat() == "2026-06-19T17:00:00"
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-06-20T00:00:00"
+
+
+def test_extract_repairs_missing_end_at_from_dash_date_range():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-08-21T18:00:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Фестиваль русского рока «Наследие» пройдет 21–22 августа. Начало 21 августа в 18:00.",
+            published_at="2026-08-01T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.start_at.isoformat() == "2026-08-21T18:00:00"
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-08-22T00:00:00"
+
+
+def test_extract_repairs_missing_end_at_from_from_to_date_range():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-08-21T10:00:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Форум пройдет с 21 по 23 августа.",
+            published_at="2026-08-01T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-08-23T00:00:00"
+
+
+def test_extract_repairs_missing_end_at_across_month_boundary():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-08-31T09:00:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Форум пройдет 31 августа — 1 сентября.",
+            published_at="2026-08-01T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is not None
+    assert outcome.event.end_at.isoformat() == "2026-09-01T00:00:00"
+
+
+def test_extract_does_not_turn_nonconsecutive_dates_into_continuous_range():
+    client = FakeLLMClient(
+        json.dumps(
+            {
+                "is_event": True,
+                "skip_reason": None,
+                "event": _event_payload(start_at="2026-08-21T18:00:00"),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(
+            text="Показы пройдут 21 и 25 августа.",
+            published_at="2026-08-01T12:00:00+00:00",
+        )
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.end_at is None
 
 
 def test_extract_splits_non_contiguous_repeated_dates_into_events():
