@@ -164,12 +164,6 @@ _EXPLICIT_END_TIME_WORDS = re.compile(
     r"\b(?:до|по|окончание|завершение|финал|итоги|результаты)\b",
     re.IGNORECASE | re.UNICODE,
 )
-_MERGE_URL_PATTERN = re.compile(r"https?://[^\s)\]}>,]+", re.IGNORECASE)
-_MERGE_PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?\d[\d\s().-]{6,}\d)(?!\d)")
-_MERGE_LOGISTICS_WORDS = re.compile(
-    r"\b(?:регистрац|билет|ссылк|стоимост|цена|оплат|бесплатн|адрес)\w*\b",
-    re.IGNORECASE | re.UNICODE,
-)
 _DUPLICATE_TITLE_STOPWORDS = {
     "в",
     "на",
@@ -767,15 +761,11 @@ class ExtractionAgent:
             )
             merge_response_complete = all(field in payload for field in merge_fields)
             merged_event_payload = fresh.event.model_dump(mode="json")
-            description_rejected = False
             for field in merge_fields:
                 if field not in payload:
                     continue
                 value = payload[field]
                 if value is None and merged_event_payload.get(field) is not None:
-                    continue
-                if field == "description" and isinstance(value, str) and _introduces_unconfirmed_contacts(value, fresh):
-                    description_rejected = True
                     continue
                 merged_event_payload[field] = value
             merged_event = Event.model_validate(merged_event_payload)
@@ -790,8 +780,6 @@ class ExtractionAgent:
         metadata["duplicate_event_merge_count"] = len(previous_to_merge)
         if merge_response_complete and covered_sources:
             metadata["duplicate_event_merge_sources"] = sorted(covered_sources)
-        if description_rejected:
-            metadata["duplicate_event_merge_description"] = "rejected_unconfirmed_contacts"
         return fresh.model_copy(update={"event": merged_event, "raw_llm_metadata": metadata})
 
     def _refine_event_type(self, event_payload: dict[str, Any], raw_text: str) -> dict[str, Any]:
@@ -1167,40 +1155,6 @@ def _resolve_event_date(day: int, month: int, published_at: str | None) -> date 
     return event_date
 
 
-def _introduces_unconfirmed_contacts(description: str, fresh: ExtractedEvent) -> bool:
-    fresh_context = "\n".join(
-        value
-        for value in (fresh.event.description, fresh.post.raw_text_for_prompt())
-        if value
-    )
-    for pattern in (_MERGE_URL_PATTERN, _MERGE_PHONE_PATTERN):
-        fresh_values = {match.group(0).rstrip(".,;") for match in pattern.finditer(fresh_context)}
-        candidate_values = {match.group(0).rstrip(".,;") for match in pattern.finditer(description)}
-        if candidate_values - fresh_values:
-            return True
-    return False
-
-
-def _semantic_previous_description(description: str | None) -> str | None:
-    if not description:
-        return None
-    sentences = re.split(r"(?<=[.!?])\s+", description.strip())
-    semantic_sentences = []
-    for sentence in sentences:
-        if not sentence:
-            continue
-        if _MERGE_URL_PATTERN.search(sentence):
-            continue
-        if _MERGE_PHONE_PATTERN.search(sentence):
-            continue
-        if _DATE_PATTERN.search(sentence) or re.search(r"\b\d{1,2}[:.]\d{2}\b", sentence):
-            continue
-        if _MERGE_LOGISTICS_WORDS.search(sentence):
-            continue
-        semantic_sentences.append(sentence.strip())
-    return " ".join(semantic_sentences) or None
-
-
 def _merged_source_ids(item: ExtractedEvent) -> set[str]:
     metadata = item.raw_llm_metadata or {}
     values = metadata.get("duplicate_event_merge_sources")
@@ -1237,7 +1191,7 @@ def _duplicate_merge_input(item: ExtractedEvent, *, include_facts: bool) -> dict
     if include_facts:
         return {"event": item.event.model_dump(mode="json")}
     return {
-        "description": _semantic_previous_description(item.event.description),
+        "description": item.event.description,
         "relevant_roles": item.event.relevant_roles,
         "industries": item.event.industries,
         "skills": item.event.skills,

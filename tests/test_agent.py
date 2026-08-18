@@ -1476,7 +1476,7 @@ def test_extract_batch_duplicate_merge_failure_keeps_fresh_event_unchanged():
     assert result.outcomes[1].event.description == "Короткое свежее описание."
 
 
-def test_extract_batch_rejects_merged_description_with_unconfirmed_old_link():
+def test_extract_batch_preserves_previous_ticket_link_when_fresh_has_no_link():
     old_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
     old_payload.update(
         description="Подробная программа мастер-класса. Регистрация: https://old.example/register",
@@ -1515,12 +1515,104 @@ def test_extract_batch_rejects_merged_description_with_unconfirmed_old_link():
     result = ExtractionAgent(llm_client=client).extract_batch(posts)
 
     merged = result.events[0]
-    assert merged.event.description == "Свежий анонс мастер-класса."
+    assert merged.event.description == "Подробная программа мастер-класса. Регистрация: https://old.example/register"
     assert merged.event.skills == ["painting"]
     assert merged.event.target_audience_text == "Художники и начинающие мастера"
     assert merged.raw_llm_metadata is not None
-    assert merged.raw_llm_metadata["duplicate_event_merge_description"] == "rejected_unconfirmed_contacts"
-    assert "https://old.example/register" not in client.calls[2][1]
+    assert "duplicate_event_merge_description" not in merged.raw_llm_metadata
+    assert "https://old.example/register" in client.calls[2][1]
+
+
+def test_extract_batch_prefers_fresh_link_when_previous_link_conflicts():
+    old_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    old_payload.update(
+        description="Регистрация: https://old.example/register",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    fresh_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    fresh_payload.update(
+        description="Свежий анонс. Билеты: https://new.example/tickets",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    merge_response = json.dumps(
+        {
+            "description": "Свежий анонс. Билеты: https://new.example/tickets",
+            "relevant_roles": ["Participant"],
+            "industries": ["Art"],
+            "skills": None,
+            "target_audience_text": None,
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            merge_response,
+        ]
+    )
+    posts = [
+        SourcePost(text="8 июля мастер-класс Живая картина.", published_at="2026-07-01T12:00:00+03:00"),
+        SourcePost(
+            text="8 июля мастер-класс Живая картина. Билеты: https://new.example/tickets",
+            published_at="2026-07-07T12:00:00+03:00",
+        ),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    merged = result.events[0]
+    assert merged.event.description == "Свежий анонс. Билеты: https://new.example/tickets"
+    assert merged.raw_llm_metadata is not None
+    assert "duplicate_event_merge_description" not in merged.raw_llm_metadata
+    assert "https://old.example/register" in client.calls[2][1]
+    assert "https://new.example/tickets" in client.calls[2][1]
+
+
+def test_duplicate_merge_prompt_forbids_invented_links():
+    old_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    old_payload.update(
+        description="Билеты: https://tickets.example/real",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    fresh_payload = _event_payload("2026-07-08T20:00:00", title="Живая картина")
+    fresh_payload.update(
+        description="Свежий анонс мастер-класса.",
+        relevant_roles=["Participant"],
+        industries=["Art"],
+    )
+    merge_response = json.dumps(
+        {
+            "description": "Свежий анонс мастер-класса. Билеты: https://tickets.example/real",
+            "relevant_roles": ["Participant"],
+            "industries": ["Art"],
+            "skills": None,
+            "target_audience_text": None,
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": old_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": fresh_payload}, ensure_ascii=False),
+            merge_response,
+        ]
+    )
+    posts = [
+        SourcePost(text="8 июля мастер-класс Живая картина.", published_at="2026-07-01T12:00:00+03:00"),
+        SourcePost(text="8 июля снова пройдет мастер-класс Живая картина.", published_at="2026-07-07T12:00:00+03:00"),
+    ]
+
+    result = ExtractionAgent(llm_client=client).extract_batch(posts)
+
+    merged = result.events[0]
+    assert merged.event.description == "Свежий анонс мастер-класса. Билеты: https://tickets.example/real"
+    assert merged.raw_llm_metadata is not None
+    assert "Не выдумывай факты, ссылки или условия" in client.calls[2][0]
+    assert "https://tickets.example/real" in client.calls[2][1]
 
 
 def test_extract_batch_partial_duplicate_merge_keeps_missing_fresh_fields():
