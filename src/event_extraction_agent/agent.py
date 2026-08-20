@@ -6,6 +6,7 @@ import re
 import threading
 import time as time_module
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -26,6 +27,8 @@ from event_extraction_agent.models import (
 from event_extraction_agent.prompts import (
     ATTENDANCE_TYPE_VALUES,
     DUPLICATE_EVENT_MERGE_PROMPT,
+    SEMANTIC_DUPLICATE_CLASSIFICATION_PROMPT,
+    SEMANTIC_DUPLICATE_RELATIONS,
     EVENT_TYPE_CLASSIFICATION_PROMPT,
     EVENT_TYPE_VALUES,
     INDUSTRY_VALUES,
@@ -37,10 +40,12 @@ from event_extraction_agent.prompts import (
     build_event_type_classification_prompt,
     build_extraction_prompt,
     build_invalid_date_repair_prompt,
+    build_semantic_duplicate_classification_prompt,
     build_title_description_refinement_prompt,
     duplicate_event_merge_json_schema,
     event_type_json_schema,
     extraction_json_schema,
+    semantic_duplicate_classification_json_schema,
     title_description_json_schema,
 )
 from event_extraction_agent.validator import ValidationIssue, validate_extraction_result
@@ -164,6 +169,13 @@ _EXPLICIT_END_TIME_WORDS = re.compile(
     r"\b(?:до|по|окончание|завершение|финал|итоги|результаты)\b",
     re.IGNORECASE | re.UNICODE,
 )
+_EMBEDDED_URL_PATTERN = re.compile(r"https?://[^\s<>\"'()\[\]{}]+", re.IGNORECASE)
+_SEMANTIC_DUPLICATE_MAX_DESCRIPTION_CHARS = 3000
+_SEMANTIC_DUPLICATE_MAX_RAW_TEXT_CHARS = 6000
+_SEMANTIC_DUPLICATE_MAX_CHECKS_PER_BATCH = 32
+_SEMANTIC_DUPLICATE_TEXT_THRESHOLD = 0.45
+_SEMANTIC_DUPLICATE_LINK_TEXT_THRESHOLD = 0.15
+_SEMANTIC_DUPLICATE_LOCATION_TEXT_THRESHOLD = 0.25
 _DUPLICATE_TITLE_STOPWORDS = {
     "в",
     "на",
@@ -679,6 +691,7 @@ class ExtractionAgent:
             settings=batch_settings,
             error_limit_reached=error_limit_reached,
             duplicate_event_merger=self._merge_duplicate_event_group,
+            semantic_duplicate_classifier=self._classify_semantic_duplicate,
         )
 
     def extract_incremental(
@@ -720,6 +733,7 @@ class ExtractionAgent:
             [outcome for outcome in outcomes if outcome is not None],
             settings=settings,
             duplicate_event_merger=self._merge_duplicate_event_group,
+            semantic_duplicate_classifier=self._classify_semantic_duplicate,
         )
 
     def extract_event(self, post: SourcePost) -> Event:
@@ -727,6 +741,30 @@ class ExtractionAgent:
         if outcome.status != ExtractionStatus.EXTRACTED or outcome.event is None:
             raise ValueError(f"event extraction failed: {outcome.status}: {outcome.errors}")
         return outcome.event
+
+    def _classify_semantic_duplicate(
+        self,
+        left: ExtractedEvent,
+        right: ExtractedEvent,
+    ) -> bool:
+        prompt = build_semantic_duplicate_classification_prompt(
+            left=_semantic_duplicate_input(left),
+            right=_semantic_duplicate_input(right),
+        )
+        try:
+            content = self._complete(
+                self.llm_client,
+                SEMANTIC_DUPLICATE_CLASSIFICATION_PROMPT,
+                prompt,
+                semantic_duplicate_classification_json_schema(),
+            )
+            payload = _parse_llm_json(content)
+            relation = payload.get("relation")
+            if relation not in SEMANTIC_DUPLICATE_RELATIONS:
+                return False
+            return relation == "same_event"
+        except Exception:
+            return False
 
     def _merge_duplicate_event_group(
         self,
@@ -1204,11 +1242,13 @@ def _batch_result(
     settings: BatchExtractionSettings | None,
     error_limit_reached: bool = False,
     duplicate_event_merger: Callable[[ExtractedEvent, list[ExtractedEvent]], ExtractedEvent] | None = None,
+    semantic_duplicate_classifier: Callable[[ExtractedEvent, ExtractedEvent], bool] | None = None,
 ) -> BatchExtractionResult:
     events, duplicate_events = _deduplicate_extracted_events(
         BatchExtractionResult.from_outcomes(outcomes, settings=settings).events,
         settings,
         duplicate_event_merger=duplicate_event_merger,
+        semantic_duplicate_classifier=semantic_duplicate_classifier,
     )
     resolved_outcomes = _apply_canonical_events_to_outcomes(outcomes, events)
     return BatchExtractionResult.from_outcomes(
@@ -1250,12 +1290,31 @@ def _deduplicate_extracted_events(
     events: list[ExtractedEvent],
     settings: BatchExtractionSettings | None,
     duplicate_event_merger: Callable[[ExtractedEvent, list[ExtractedEvent]], ExtractedEvent] | None = None,
+    semantic_duplicate_classifier: Callable[[ExtractedEvent, ExtractedEvent], bool] | None = None,
 ) -> tuple[list[ExtractedEvent], list[DuplicateExtractedEvent]]:
     if settings is not None and not settings.skip_event_duplicates:
         return events, []
 
     resolved_events = list(events)
     groups: list[list[int]] = []
+    semantic_decisions: dict[tuple[int, int], bool] = {}
+
+    def events_are_duplicates(left_index: int, right_index: int) -> bool:
+        left = events[left_index]
+        right = events[right_index]
+        if _events_are_duplicates(left, right):
+            return True
+        if semantic_duplicate_classifier is None or not _events_need_semantic_duplicate_check(left, right):
+            return False
+        key = (min(left_index, right_index), max(left_index, right_index))
+        if key not in semantic_decisions:
+            if len(semantic_decisions) >= _SEMANTIC_DUPLICATE_MAX_CHECKS_PER_BATCH:
+                return False
+            try:
+                semantic_decisions[key] = bool(semantic_duplicate_classifier(left, right))
+            except Exception:
+                semantic_decisions[key] = False
+        return semantic_decisions[key]
 
     # ponytail: O(n²) is fine for batch post-processing; index later if batch sizes hurt.
     for index in range(len(events)):
@@ -1263,7 +1322,7 @@ def _deduplicate_extracted_events(
             (
                 candidate
                 for candidate in groups
-                if any(_events_are_duplicates(events[index], events[other]) for other in candidate)
+                if any(events_are_duplicates(index, other) for other in candidate)
             ),
             None,
         )
@@ -1299,6 +1358,137 @@ def _duplicate_group_keep_index(group: list[int], events: list[ExtractedEvent]) 
     if with_dates:
         return max(with_dates, key=lambda index: (_published_at_sort_key(events[index].post), index))
     return min(group)
+
+
+def _events_need_semantic_duplicate_check(left: ExtractedEvent, right: ExtractedEvent) -> bool:
+    if _title_containment(left.event.title, right.event.title) >= 0.65:
+        return False
+    if not _event_date_spans_are_related(left.event, right.event):
+        return False
+
+    description_score = _text_containment(
+        _text_without_embedded_urls(left.event.description),
+        _text_without_embedded_urls(right.event.description),
+    )
+    raw_text_score = _text_containment(
+        _text_without_embedded_urls(left.post.raw_text_for_prompt()),
+        _text_without_embedded_urls(right.post.raw_text_for_prompt()),
+    )
+    text_score = max(description_score, raw_text_score)
+    same_span = _event_date_span(left.event) == _event_date_span(right.event)
+    same_type = _event_types_match(left.event, right.event)
+    shared_url = bool(_embedded_urls(left) & _embedded_urls(right))
+
+    if shared_url and (
+        text_score >= _SEMANTIC_DUPLICATE_LINK_TEXT_THRESHOLD
+        or (same_span and same_type)
+    ):
+        return True
+    if text_score >= _SEMANTIC_DUPLICATE_TEXT_THRESHOLD:
+        return True
+    return _locations_are_similar(left.event, right.event) and text_score >= (
+        _SEMANTIC_DUPLICATE_LOCATION_TEXT_THRESHOLD
+    )
+
+
+def _semantic_duplicate_input(item: ExtractedEvent) -> dict[str, Any]:
+    event = item.event
+    return {
+        "title": event.title,
+        "description": (event.description or "")[:_SEMANTIC_DUPLICATE_MAX_DESCRIPTION_CHARS] or None,
+        "start_at": event.start_at,
+        "end_at": event.end_at,
+        "city": event.city,
+        "venue_name": event.venue_name,
+        "address": event.address,
+        "event_type": getattr(event.event_type, "value", event.event_type),
+        "attendance_type": getattr(event.attendance_type, "value", event.attendance_type),
+        "source_name": event.source_name,
+        "embedded_urls": sorted(_embedded_urls(item)),
+        "raw_text": item.post.raw_text_for_prompt()[:_SEMANTIC_DUPLICATE_MAX_RAW_TEXT_CHARS],
+    }
+
+
+def _event_types_match(left: Event, right: Event) -> bool:
+    left_type = getattr(left.event_type, "value", left.event_type)
+    right_type = getattr(right.event_type, "value", right.event_type)
+    if not isinstance(left_type, str) or not isinstance(right_type, str):
+        return False
+    if left_type in {"unknown", "other"} or right_type in {"unknown", "other"}:
+        return False
+    return left_type == right_type
+
+
+def _event_date_spans_are_related(left: Event, right: Event) -> bool:
+    left_span = _event_date_span(left)
+    right_span = _event_date_span(right)
+    if left_span is None or right_span is None:
+        return False
+    left_start, left_end = left_span
+    right_start, right_end = right_span
+    if left_start <= right_end and right_start <= left_end:
+        return True
+    if left_end < right_start:
+        return (right_start - left_end).days <= 1
+    return (left_start - right_end).days <= 1
+
+
+def _event_date_span(event: Event) -> tuple[date, date] | None:
+    if event.start_at is None:
+        return None
+    start = event.start_at.date()
+    end = event.end_at.date() if event.end_at is not None else start
+    return start, max(start, end)
+
+
+def _text_without_embedded_urls(value: str | None) -> str:
+    if not value:
+        return ""
+    return _EMBEDDED_URL_PATTERN.sub(" ", value)
+
+
+def _embedded_urls(item: ExtractedEvent) -> set[str]:
+    values = (item.event.description or "", item.post.raw_text_for_prompt())
+    return {
+        normalized
+        for value in values
+        for match in _EMBEDDED_URL_PATTERN.finditer(value)
+        if (normalized := _normalize_embedded_url(match.group(0)))
+    }
+
+
+def _normalize_embedded_url(raw: str) -> str | None:
+    cleaned = raw.rstrip(".,;:!?)]}»\"")
+    try:
+        parsed = urllib.parse.urlsplit(cleaned)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+
+    host = parsed.hostname.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is not None and not ((parsed.scheme.lower() == "http" and port == 80) or (parsed.scheme.lower() == "https" and port == 443)):
+        host = f"{host}:{port}"
+    path = parsed.path.rstrip("/") or "/"
+    query = urllib.parse.urlencode(
+        sorted(
+            (key, value)
+            for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid", "yclid"}
+        ),
+        doseq=True,
+    )
+    return urllib.parse.urlunsplit(("https", host, path, query, ""))
+
+
+def _locations_are_similar(left: Event, right: Event) -> bool:
+    left_values = [value for value in (left.address, left.venue_name) if value]
+    right_values = [value for value in (right.address, right.venue_name) if value]
+    return any(_text_containment(left_value, right_value) >= 0.8 for left_value in left_values for right_value in right_values)
 
 
 def _events_are_duplicates(left: ExtractedEvent, right: ExtractedEvent) -> bool:

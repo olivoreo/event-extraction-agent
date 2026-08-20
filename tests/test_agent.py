@@ -12,7 +12,11 @@ from event_extraction_agent import (
     GroqDailyRateLimitError,
     SourcePost,
 )
-from event_extraction_agent.agent import _unmerged_duplicate_sources
+from event_extraction_agent.agent import (
+    _SEMANTIC_DUPLICATE_MAX_CHECKS_PER_BATCH,
+    _deduplicate_extracted_events,
+    _unmerged_duplicate_sources,
+)
 from event_extraction_agent.prompts import SYSTEM_PROMPT, build_extraction_prompt
 
 
@@ -1804,6 +1808,231 @@ def test_extract_batch_deduplicates_events_with_shared_deadline_even_if_start_da
     assert result.duplicate_events[0].outcome_index == 0
     assert result.duplicate_events[0].duplicate_of == 1
     assert result.outcomes[1].status == ExtractionStatus.EXTRACTED
+
+
+def test_extract_batch_semantically_deduplicates_different_titles_with_shared_event_url():
+    first_payload = _event_payload("2026-08-21T18:00:00", title="Большой летний фестиваль")
+    first_payload.update(
+        description="Двухдневная музыкальная программа на набережной.",
+        event_type="Festival",
+        industries=["PerformingArts"],
+    )
+    second_payload = _event_payload("2026-08-21T18:00:00", title="Музыка у реки")
+    second_payload.update(
+        description="Главное музыкальное событие выходных на набережной.",
+        event_type="Festival",
+        industries=["PerformingArts"],
+    )
+    merge_response = json.dumps(
+        {
+            "description": "Двухдневная музыкальная программа на набережной.",
+            "relevant_roles": ["Participant", "Spectator"],
+            "industries": ["PerformingArts"],
+            "skills": None,
+            "target_audience_text": None,
+        },
+        ensure_ascii=False,
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": first_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": second_payload}, ensure_ascii=False),
+            json.dumps({"relation": "same_event"}),
+            merge_response,
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(
+                text="Большой летний фестиваль. Билеты: https://tickets.example/show?event=42&utm_source=vk",
+                published_at="2026-08-10T12:00:00+03:00",
+            ),
+            SourcePost(
+                text="Музыка у реки. Билеты: http://TICKETS.example/show/?utm_medium=social&event=42",
+                published_at="2026-08-12T12:00:00+03:00",
+            ),
+        ]
+    )
+
+    assert len(result.events) == 1
+    assert len(result.duplicate_events) == 1
+    assert len(client.calls) == 4
+    assert "same_event" in client.calls[2][0]
+    assert "related_event" in client.calls[2][0]
+    assert '"embedded_urls":["https://tickets.example/show?event=42"]' in client.calls[2][1]
+
+
+def test_extract_batch_semantically_compares_different_titles_without_url_when_facts_strongly_overlap():
+    first_payload = _event_payload("2026-09-05T18:00:00", title="Осенний творческий форум", venue_name="Дом культуры")
+    first_payload.update(description="Встреча дизайнеров и художников с лекциями и практическими сессиями.")
+    second_payload = _event_payload("2026-09-05T18:00:00", title="Творческий день", venue_name="Дом культуры")
+    second_payload.update(description="Встреча художников и дизайнеров с практическими сессиями и лекциями.")
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": first_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": second_payload}, ensure_ascii=False),
+            json.dumps({"relation": "different_event"}),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="5 сентября пройдет осенний творческий форум в Доме культуры."),
+            SourcePost(text="5 сентября пройдет творческий день в Доме культуры."),
+        ]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+    assert len(client.calls) == 3
+
+
+def test_extract_batch_keeps_related_child_event_with_shared_event_url():
+    festival_payload = _event_payload("2026-08-21T18:00:00", title="Городской фестиваль")
+    festival_payload.update(description="Фестиваль музыки и искусства.", event_type="Festival")
+    performance_payload = _event_payload("2026-08-21T20:00:00", title="Концерт группы Север")
+    performance_payload.update(description="Отдельное выступление группы в программе фестиваля.", event_type="MusicEvent")
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": festival_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": performance_payload}, ensure_ascii=False),
+            json.dumps({"relation": "related_event"}),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="Городской фестиваль. Билеты: https://tickets.example/festival"),
+            SourcePost(text="Концерт группы Север. Билеты: https://tickets.example/festival"),
+        ]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+    assert len(client.calls) == 3
+    assert "Общая билетная или регистрационная ссылка сама по себе не делает их одним событием" in client.calls[2][0]
+
+
+def test_extract_batch_semantic_duplicate_classifier_fails_closed():
+    first_payload = _event_payload("2026-08-21T18:00:00", title="Вечер на набережной")
+    second_payload = _event_payload("2026-08-21T18:00:00", title="Летняя программа")
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": first_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": second_payload}, ensure_ascii=False),
+            "not json",
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="Вечер на набережной. Регистрация: https://events.example/42"),
+            SourcePost(text="Летняя программа. Регистрация: https://events.example/42"),
+        ]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+    assert len(client.calls) == 3
+
+
+def test_extract_batch_shared_url_alone_is_not_enough_for_semantic_check():
+    first_payload = _event_payload(
+        "2026-08-21T18:00:00",
+        title="Лекция о фотографии",
+        venue_name="Лекторий",
+    )
+    first_payload.update(description="Разбор композиции и света.", event_type="EducationEvent")
+    second_payload = _event_payload("2026-08-21T18:00:00", title="Вечер настольных игр")
+    second_payload.update(description="Свободная игровая встреча для участников.", event_type="SocialEvent")
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": first_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": second_payload}, ensure_ascii=False),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="Лекция о фотографии. https://events.example/day"),
+            SourcePost(text="Вечер настольных игр. https://events.example/day"),
+        ]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+    assert len(client.calls) == 2
+
+
+def test_semantic_duplicate_checks_are_bounded_per_batch():
+    events = [
+        ExtractedEvent(
+            event=Event.model_validate(
+                {
+                    **{
+                        key: value
+                        for key, value in _event_payload(
+                            "2026-08-21T18:00:00",
+                            title=f"Событие {index}",
+                            venue_name="Общая площадка",
+                        ).items()
+                        if key != "seniority_level"
+                    },
+                    "description": "Общая программа для участников с лекциями и практическими занятиями.",
+                    "event_type": "EducationEvent",
+                    "raw_text": f"Событие {index}",
+                }
+            ),
+            post=SourcePost(
+                text=(
+                    f"Событие {index}. Общая программа для участников с лекциями и практическими занятиями. "
+                    "Регистрация: https://events.example/program"
+                )
+            ),
+            outcome_index=index,
+            event_index=0,
+        )
+        for index in range(_SEMANTIC_DUPLICATE_MAX_CHECKS_PER_BATCH + 3)
+    ]
+    calls = 0
+
+    def classify(_left: ExtractedEvent, _right: ExtractedEvent) -> bool:
+        nonlocal calls
+        calls += 1
+        return False
+
+    deduplicated, duplicates = _deduplicate_extracted_events(
+        events,
+        BatchExtractionSettings(),
+        semantic_duplicate_classifier=classify,
+    )
+
+    assert len(deduplicated) == len(events)
+    assert duplicates == []
+    assert calls == _SEMANTIC_DUPLICATE_MAX_CHECKS_PER_BATCH
+
+
+def test_extract_batch_does_not_semantically_compare_distant_events_with_shared_url():
+    first_payload = _event_payload("2026-08-01T18:00:00", title="Августовская встреча")
+    second_payload = _event_payload("2026-08-20T18:00:00", title="Летний вечер")
+    client = FakeLLMClient(
+        [
+            json.dumps({"is_event": True, "skip_reason": None, "event": first_payload}, ensure_ascii=False),
+            json.dumps({"is_event": True, "skip_reason": None, "event": second_payload}, ensure_ascii=False),
+        ]
+    )
+
+    result = ExtractionAgent(llm_client=client).extract_batch(
+        [
+            SourcePost(text="Августовская встреча. Билеты: https://tickets.example/series"),
+            SourcePost(text="Летний вечер. Билеты: https://tickets.example/series"),
+        ]
+    )
+
+    assert len(result.events) == 2
+    assert result.duplicate_events == []
+    assert len(client.calls) == 2
 
 
 def test_extract_batch_can_keep_semantic_event_duplicates():

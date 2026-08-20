@@ -213,6 +213,46 @@ def title_description_json_schema() -> dict[str, Any]:
     }
 
 
+SEMANTIC_DUPLICATE_RELATIONS = ("same_event", "related_event", "different_event")
+
+SEMANTIC_DUPLICATE_CLASSIFICATION_PROMPT = """
+Ты определяешь отношение между двумя анонсами мероприятий.
+
+Верни только JSON {"relation":"same_event|related_event|different_event"} без markdown и пояснений.
+
+Классы:
+- same_event — оба анонса описывают одно и то же реальное мероприятие или одну и ту же серию/программу как единое событие. Названия могут сильно различаться.
+- related_event — события связаны, но посетитель может воспринимать их как разные единицы программы: отдельное выступление, сессия, лекция, конкурс, активность или другое дочернее событие внутри фестиваля/программы. Общая билетная или регистрационная ссылка сама по себе не делает их одним событием.
+- different_event — разные мероприятия либо данных недостаточно, чтобы безопасно считать их одним событием.
+
+Правила:
+1. Не решай по одному названию: названия одного события могут различаться.
+2. Совпадение даты, площадки, организатора или URL — только признаки связи, а не доказательство same_event.
+3. Сравнивай смысл и масштаб: что именно происходит, для чего приходит участник, является ли один анонс частью другого.
+4. Если один анонс описывает общий фестиваль/программу, а второй — конкретное выступление или отдельную активность внутри неё, выбирай related_event.
+5. same_event выбирай только когда объединение не уничтожит самостоятельное мероприятие.
+6. При сомнении выбирай different_event. Это безопаснее ошибочного объединения.
+""".strip()
+
+
+def semantic_duplicate_classification_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"relation": {"type": "string", "enum": list(SEMANTIC_DUPLICATE_RELATIONS)}},
+        "required": ["relation"],
+        "additionalProperties": False,
+    }
+
+
+def build_semantic_duplicate_classification_prompt(*, left: dict[str, Any], right: dict[str, Any]) -> str:
+    return (
+        "Событие A:\n"
+        f"{json.dumps(left, ensure_ascii=False, separators=(',', ':'), default=str)}\n\n"
+        "Событие B:\n"
+        f"{json.dumps(right, ensure_ascii=False, separators=(',', ':'), default=str)}"
+    )
+
+
 DUPLICATE_EVENT_MERGE_PROMPT = """
 Ты объединяешь смысловую информацию о двух или нескольких версиях одного и того же мероприятия.
 Самая свежая версия уже выбрана системой и остается основной. Не меняй фактические и идентифицирующие поля свежего события: title, start_at, end_at, timezone, city, venue_name, address, event_type, attendance_type, language и price_text.
