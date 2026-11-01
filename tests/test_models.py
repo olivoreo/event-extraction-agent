@@ -79,6 +79,28 @@ def test_event_normalizes_mixed_datetime_offsets_to_local_wall_time(start_at, en
     assert event.end_at.tzinfo is None
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Europe/Moscow", "Europe/Moscow"),
+        (" Asia/Kathmandu ", "Asia/Kathmandu"),
+        ("UTC", "UTC"),
+        ("unknown", "unknown"),
+        (" UNKNOWN ", "unknown"),
+        ("Europe/Volgogradd", "unknown"),
+        ("GMT+3", "unknown"),
+        ("Europe/../Moscow", "unknown"),
+        ("   ", "unknown"),
+    ],
+)
+def test_event_normalizes_invalid_iana_timezone(value: str, expected: str):
+    event = Event(**{**VALID_EVENT_DATA, "timezone": value})
+
+    assert event.timezone == expected
+    assert event.start_at == datetime(2026, 6, 15, 19, 0)
+    assert event.end_at is None
+
+
 def test_event_requires_core_fields():
     for field in ["title", "timezone", "language", "raw_text"]:
         with pytest.raises(ValidationError):

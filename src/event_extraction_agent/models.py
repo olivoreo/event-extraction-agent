@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -181,12 +182,24 @@ class Event(BaseModel):
     price_text: str | None = None
     target_audience_text: str | None = None
 
-    @field_validator("title", "timezone", "language", "raw_text")
+    @field_validator("title", "language", "raw_text")
     @classmethod
     def required_text_must_not_be_blank(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("required text field must not be blank")
+        return normalized
+
+    @field_validator("timezone")
+    @classmethod
+    def normalize_iana_timezone(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or normalized.lower() == "unknown":
+            return "unknown"
+        try:
+            ZoneInfo(normalized)
+        except (ZoneInfoNotFoundError, ValueError):
+            return "unknown"
         return normalized
 
     @field_validator(

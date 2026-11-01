@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 
@@ -499,6 +500,23 @@ def test_extract_preserves_explicit_timezone_from_llm():
     assert outcome.event is not None
     assert outcome.event.timezone == "Europe/Samara"
     assert outcome.event.start_at.isoformat() == "2026-06-05T18:00:00"
+
+
+def test_extract_replaces_invalid_iana_timezone_without_dropping_event():
+    payload = _event_payload(start_at="2026-06-05T18:00:00")
+    payload["end_at"] = "2026-06-05T20:00:00"
+    payload["timezone"] = "Europe/Volgogradd"
+    client = FakeLLMClient(json.dumps({"is_event": True, "event": payload}, ensure_ascii=False))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="5 июня с 18:00 до 20:00 состоится встреча.")
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.timezone == "unknown"
+    assert outcome.event.start_at == datetime(2026, 6, 5, 18, 0)
+    assert outcome.event.end_at == datetime(2026, 6, 5, 20, 0)
 
 
 def test_timezone_prompt_rejects_indirect_location_clues_and_defaults():
