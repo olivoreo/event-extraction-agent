@@ -464,6 +464,54 @@ def test_extract_uses_unknown_timezone_without_local_context():
     assert outcome.event.timezone == "unknown"
 
 
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "Ресторан «Маяк» приглашает на встречу 5 июня в 18:00.",
+        "Набережная — название выставки, открытие 5 июня в 18:00.",
+        "Амфитеатр: концерт 5 июня в 18:00.",
+        "В Париже состоится встреча 5 июня в 18:00.",
+    ],
+)
+def test_extract_does_not_guess_timezone_when_llm_cannot_identify_it(raw_text):
+    payload = _event_payload(start_at="2026-06-05T18:00:00")
+    payload["timezone"] = None
+    client = FakeLLMClient(json.dumps({"is_event": True, "event": payload}, ensure_ascii=False))
+
+    outcome = ExtractionAgent(llm_client=client).extract(SourcePost(text=raw_text))
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.timezone == "unknown"
+    assert outcome.event.start_at.isoformat() == "2026-06-05T18:00:00"
+
+
+def test_extract_preserves_explicit_timezone_from_llm():
+    payload = _event_payload(start_at="2026-06-05T18:00:00+04:00")
+    payload["timezone"] = "Europe/Samara"
+    client = FakeLLMClient(json.dumps({"is_event": True, "event": payload}, ensure_ascii=False))
+
+    outcome = ExtractionAgent(llm_client=client).extract(
+        SourcePost(text="5 июня в 18:00 встречаемся в Самаре.")
+    )
+
+    assert outcome.status == ExtractionStatus.EXTRACTED
+    assert outcome.event is not None
+    assert outcome.event.timezone == "Europe/Samara"
+    assert outcome.event.start_at.isoformat() == "2026-06-05T18:00:00"
+
+
+def test_timezone_prompt_rejects_indirect_location_clues_and_defaults():
+    assert "timezone" in SYSTEM_PROMPT
+    assert "IANA" in SYSTEM_PROMPT
+    assert "unknown" in SYSTEM_PROMPT
+    assert "Asia/Tokyo" in SYSTEM_PROMPT
+    assert "America/New_York" in SYSTEM_PROMPT
+    assert "набережная" in SYSTEM_PROMPT
+    assert "published_at" in SYSTEM_PROMPT
+    assert "Не подставляй пояс по умолчанию" in SYSTEM_PROMPT
+
+
 def test_extract_splits_consecutive_listed_dates_with_shared_time():
     client = FakeLLMClient(
         json.dumps(

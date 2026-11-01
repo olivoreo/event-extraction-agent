@@ -134,10 +134,6 @@ _DATE_PATTERN = re.compile(
     rf"\b(?P<day>\d{{1,2}})\s*(?P<month>{_MONTH_PATTERN})\b",
     re.IGNORECASE | re.UNICODE,
 )
-_LOCAL_CONTEXT_WORDS = re.compile(
-    r"\b(волгоград|москва|санкт-петербург|амфитеатр|ресторан|храм|набережная)\b",
-    re.IGNORECASE | re.UNICODE,
-)
 _DATETIME_OFFSET_SUFFIX = re.compile(r"([T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:Z|[+-]\d{2}:?\d{2})$")
 _GIVEAWAY_RESULT_WORDS = re.compile(
     r"\b(итоги\s+(?:розыгрыша|конкурса)|поздравляем\s+победител|победител[ья]\b)",
@@ -972,7 +968,7 @@ def _repair_event_payload(
     if not isinstance(copied.get("language"), str) or not copied.get("language", "").strip():
         copied["language"] = "ru"
     if _is_missing_value(copied.get("timezone")):
-        copied["timezone"] = "Europe/Moscow" if _LOCAL_CONTEXT_WORDS.search(raw_text) else "unknown"
+        copied["timezone"] = "unknown"
     _strip_datetime_offsets(copied)
     if _is_missing_value(copied.get("start_at")):
         inferred_start_at = _extract_start_at(raw_text, published_at)
