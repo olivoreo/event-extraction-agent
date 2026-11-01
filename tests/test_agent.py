@@ -505,8 +505,11 @@ def test_timezone_prompt_rejects_indirect_location_clues_and_defaults():
     assert "timezone" in SYSTEM_PROMPT
     assert "IANA" in SYSTEM_PROMPT
     assert "unknown" in SYSTEM_PROMPT
-    assert "Asia/Tokyo" in SYSTEM_PROMPT
-    assert "America/New_York" in SYSTEM_PROMPT
+    assert "идентификатор IANA" in SYSTEM_PROMPT
+    assert "однозначно установить" in SYSTEM_PROMPT
+    assert "Asia/Tokyo" not in SYSTEM_PROMPT
+    assert "Europe/Paris" not in SYSTEM_PROMPT
+    assert "America/New_York" not in SYSTEM_PROMPT
     assert "набережная" in SYSTEM_PROMPT
     assert "published_at" in SYSTEM_PROMPT
     assert "Не подставляй пояс по умолчанию" in SYSTEM_PROMPT
